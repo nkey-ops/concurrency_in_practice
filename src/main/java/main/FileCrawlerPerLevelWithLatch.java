@@ -57,7 +57,7 @@ public class FileCrawlerPerLevelWithLatch {
         currentLevelQueue.add(requireNonNull(root));
 
         long allFiles = 0;
-        long startTime = System.currentTimeMillis();
+        float allLevelsParcingTimeSec = 0;
         try {
 
             int levelCounter = 0;
@@ -75,20 +75,28 @@ public class FileCrawlerPerLevelWithLatch {
                 assert threadsToCreate <= pool.getMaximumPoolSize()
                         : "threadsToCreate should be less or equal to max pool size";
 
-                var countDownLatch = new CountDownLatch(threadsToCreate);
+
+                var threadStopLatch = new CountDownLatch(threadsToCreate);
+                var threadStartLatch = new CountDownLatch(1);
                 for (int i = 0; i < threadsToCreate; i++) {
                     pool.execute(
                             new FileCrawler(
                                     currentLevelQueue,
                                     nextLevelQueue,
                                     levelStatistics,
-                                    countDownLatch));
+                                    threadStartLatch,
+                                    threadStopLatch));
                 }
 
-                countDownLatch.await();
+                long levelStartTime = System.currentTimeMillis();
+                threadStartLatch.countDown();
+                threadStopLatch.await();
+                levelStatistics.levelTimeSec = (System.currentTimeMillis() - levelStartTime) / 1000f;
+
 
                 System.out.println(levelStatistics);
                 allFiles += levelStatistics.totalFilesAndDirectories;
+                allLevelsParcingTimeSec += levelStatistics.levelTimeSec;
                 assert currentLevelQueue.isEmpty() : "Current level queue should be empty";
 
                 var tmp = currentLevelQueue;
@@ -98,7 +106,7 @@ public class FileCrawlerPerLevelWithLatch {
         } catch (Exception e) {
             e.printStackTrace();
         } finally {
-            System.out.printf("Total Files: %s | Time Taken: %.2f sec%n",allFiles, (System.currentTimeMillis() - startTime) / 1000f);
+            System.out.printf("Total Files: %s | Time Taken: %.2f sec%n",allFiles, allLevelsParcingTimeSec);
             pool.shutdownNow();
         }
     }
@@ -106,25 +114,29 @@ public class FileCrawlerPerLevelWithLatch {
     private static class FileCrawler implements Runnable {
 
         private BlockingQueue<File> currentLevel;
-        private CountDownLatch countDownLatch;
         private LinkedBlockingQueue<File> nextLevelQueue;
         private LevelStatistics levelStatistics;
+        private CountDownLatch threadStartLatch;
+        private CountDownLatch threadStopLatch;
 
         public FileCrawler(
                 BlockingQueue<File> currentLevel,
                 LinkedBlockingQueue<File> nextLevelQueue,
                 LevelStatistics levelStatistics,
-                CountDownLatch countDownLatch) {
+                CountDownLatch threadStartLatch , 
+                CountDownLatch threadStopLatch) {
 
             this.nextLevelQueue = requireNonNull(nextLevelQueue);
             this.currentLevel = requireNonNull(currentLevel);
             this.levelStatistics = requireNonNull(levelStatistics);
-            this.countDownLatch = requireNonNull(countDownLatch);
+            this.threadStartLatch = requireNonNull(threadStartLatch);
+            this.threadStopLatch = requireNonNull(threadStopLatch);
         }
 
         @Override
         public void run() {
             try {
+                threadStartLatch.await();
                 for (var file = currentLevel.poll();
                         file != null && !Thread.currentThread().isInterrupted();
                         file = currentLevel.poll()) {
@@ -155,7 +167,7 @@ public class FileCrawlerPerLevelWithLatch {
             } catch (Exception e) {
                 e.printStackTrace();
             } finally {
-                countDownLatch.countDown();
+                threadStopLatch.countDown();
             }
         }
     }
@@ -168,6 +180,7 @@ public class FileCrawlerPerLevelWithLatch {
         public final AtomicInteger symbolicReferences = new AtomicInteger();
         public final int totalFilesAndDirectories;
         public final int levelCounter;
+        public float levelTimeSec;
 
         public LevelStatistics(int levelCounter, int totalFilesAndDirs) {
             this.levelCounter = levelCounter;
@@ -177,10 +190,11 @@ public class FileCrawlerPerLevelWithLatch {
         @Override
         public String toString() {
             return """
-level: %5s | files:  %7s | dirs: %7s | total: %7s | symb-ref: %7s | non-exist: %7s | unread: %7s\
+level: %5s | time: %.3f sec | files:  %7s | dirs: %7s | total: %7s | symb-ref: %7s | non-exist: %7s | unread: %7s\
 """
                     .formatted(
                             levelCounter,
+                            levelTimeSec,
                             numberOfFiles.get(),
                             numberOfDirectories.get(),
                             totalFilesAndDirectories,
