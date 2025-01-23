@@ -1,8 +1,8 @@
 # FileCrawler
-[videos-ye-2025-01-20_23.32.16.webm](https://github.com/user-attachments/assets/689e4843-1a55-4801-8c41-12b4541bfab8)
+[](https://github.com/user-attachments/assets/689e4843-1a55-4801-8c41-12b4541bfab8)
 
 # FileCrawlerPerLevelWithLatch
-[videos-ye-2025-01-23_19.00.42.webm](https://github.com/user-attachments/assets/8ce4fd46-7f56-498e-bcac-677cfbd345df)
+[](https://github.com/user-attachments/assets/8ce4fd46-7f56-498e-bcac-677cfbd345df)
 
 Crawl from the root down to all possible directories on per level bases an gather information
 for each level of directories. Threads will parse only one level at a time, counting down a
