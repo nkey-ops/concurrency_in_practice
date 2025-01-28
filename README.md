@@ -25,3 +25,16 @@ current level will be outputted to the console.
                                                                                               
 Next level queue now becomes a current level queue, a new latch is created and the cycle
 is repeated till the next level queue is empty.
+
+# FileDownloaderWithFutureTask 
+[vid](https://github.com/user-attachments/assets/610eb0b0-e2c5-4801-9e90-d6c361b68736)
+
+Using FutureTask implements file downloading logic.
+                                                                                                
+Creates 15 FutureTasks and runs in separate threads. 
+The class DownloadTask represents a runnable responsible to imitate a file downloading process. 
+DownloadStatus is used to provide current information about a downloading process of DownloadTask.
+                                                                                                
+The main thread will use DownloadStatus to read status of each downloading file andsend formatted output to the console.                                                                                                
+The DownloadTask can throw a random exception, this will set the status of file downloading to "Error" with an error message" and out put to the console. 
+The main thread can randomly cancel the task which will lead to the status "Cancelled"
