@@ -1,8 +1,11 @@
 package main;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Objects;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.FutureTask;
 
 /**
@@ -18,7 +21,7 @@ import java.util.concurrent.FutureTask;
  * <p>The {@link DownloadTask} can throw a random exception, this will set the status of file
  * downloading to "Error" with an error message" and out put to the console.
  *
- * The main thread can randomly cancel the task which will lead to the status "Cancelled"
+ * <p>The main thread can randomly cancel the task which will lead to the status "Cancelled"
  */
 public class FileDownloaderWithFutureTask {
 
@@ -42,7 +45,7 @@ public class FileDownloaderWithFutureTask {
         }
 
         @Override
-        public DownloadResult call() throws Exception {
+        public DownloadResult call() throws IOException, InterruptedException {
             // generate randomly size of file, upto 100 mb
             downloadStatus.sizeBytes = (int) (Math.random() * (1024 * 1024 * 100)) + 1; // < 100MB
             downloadStatus.downloadingStartTimeMillis = System.currentTimeMillis();
@@ -50,17 +53,19 @@ public class FileDownloaderWithFutureTask {
             // sleeping for half a second, imitating downloading by adding random amount of bytes
             // out of remaining to download
 
-            while((float) downloadStatus.downloadedBytes / downloadStatus.sizeBytes < 0.94) {
+            while ((float) downloadStatus.downloadedBytes / downloadStatus.sizeBytes < 0.94) {
                 Thread.sleep(500);
                 var bytesDownloaded =
                         (int)
                                 (Math.random()
-                                        * (downloadStatus.sizeBytes - downloadStatus.downloadedBytes) / 8);
+                                        * (downloadStatus.sizeBytes
+                                                - downloadStatus.downloadedBytes)
+                                        / 8);
 
                 downloadStatus.downloadedBytes += bytesDownloaded;
 
                 // imitating random exception during downloading
-                if (Math.random() > 0.995) throw new RuntimeException("Downloading Exception");
+                if (Math.random() > 0.995) throw new IOException("Downloading Exception");
             }
 
             // just in case if after all iteration we didn't "download" all the bytes, add the
@@ -135,7 +140,9 @@ public class FileDownloaderWithFutureTask {
                                     ? ds.downloadedBytes
                                     : ds.downloadedBytes / timePassedSec;
                     int downloadStatusPercentage =
-                            ds.sizeBytes == 0 ? 100 : (int) (ds.downloadedBytes * 100 / ds.sizeBytes);
+                            ds.sizeBytes == 0
+                                    ? 100
+                                    : (int) (ds.downloadedBytes * 100 / ds.sizeBytes);
 
                     assert downloadStatusPercentage >= 0 && downloadStatusPercentage <= 100
                             : "downloadStatusPercentage is %s but should be >= 0 and <= 100"
@@ -173,14 +180,16 @@ public class FileDownloaderWithFutureTask {
 
         var status = "Finished";
 
-        if (futureTask.isCancelled()) {
-            status = "Cancelled";
-        } else {
-            try {
-                futureTask.get();
-            } catch (Exception e) {
-                status = "Error: " + e.getMessage();
-            }
+        try {
+            futureTask.get();
+        } catch (CancellationException e) {
+            status = "Cacelled";
+        } catch (InterruptedException e) {
+            status = "Interrupeted";
+        } catch (ExecutionException e) {
+            status = "Execution Exception: %s | %s".formatted(e.getCause().getClass(), e.getCause().getMessage());
+        } catch(Exception e) {
+            status = "Unexpected Exception: %s | %s".formatted(e.getCause().getClass(), e.getCause().getMessage());
         }
 
         return "%-10s | Size: %s | Downloaded: %s | Time Taken: %s sec | Status: %s "
