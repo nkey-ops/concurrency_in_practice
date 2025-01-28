@@ -26,8 +26,8 @@ public class FileDownloaderWithFutureTask {
 
     private static class DownloadStatus {
         public volatile String fileName;
-        public volatile int downloadedBytes;
-        public volatile int sizeBytes;
+        public volatile long downloadedBytes;
+        public volatile long sizeBytes;
         public volatile long downloadingStartTimeMillis;
         public volatile boolean isFinished;
     }
@@ -44,7 +44,7 @@ public class FileDownloaderWithFutureTask {
         @Override
         public DownloadResult call() throws Exception {
             // generate randomly size of file, upto 100 mb
-            downloadStatus.sizeBytes = (int) (Math.random() * (1024 * 50)) + 1; // < 100MB
+            downloadStatus.sizeBytes = (int) (Math.random() * (1024 * 1024 * 100)) + 1; // < 100MB
             downloadStatus.downloadingStartTimeMillis = System.currentTimeMillis();
 
             // sleeping for half a second, imitating downloading by adding random amount of bytes
@@ -63,10 +63,9 @@ public class FileDownloaderWithFutureTask {
                 if (Math.random() > 0.995) throw new RuntimeException("Downloading Exception");
             }
 
-            // just in case if after all iteration we didn't "download" all the bytes,add the
+            // just in case if after all iteration we didn't "download" all the bytes, add the
             // remaining
-            downloadStatus.downloadedBytes +=
-                    downloadStatus.sizeBytes - downloadStatus.downloadedBytes;
+            downloadStatus.downloadedBytes = downloadStatus.sizeBytes;
 
             return new DownloadResult();
         }
@@ -131,12 +130,12 @@ public class FileDownloaderWithFutureTask {
                             (int)
                                     ((System.currentTimeMillis() - ds.downloadingStartTimeMillis)
                                             / 1000);
-                    int bytesPerSec =
+                    long bytesPerSec =
                             timePassedSec == 0
                                     ? ds.downloadedBytes
                                     : ds.downloadedBytes / timePassedSec;
                     int downloadStatusPercentage =
-                            ds.sizeBytes == 0 ? 50 : ds.downloadedBytes * 50 / ds.sizeBytes;
+                            ds.sizeBytes == 0 ? 100 : (int) (ds.downloadedBytes * 100 / ds.sizeBytes);
 
                     assert downloadStatusPercentage >= 0 && downloadStatusPercentage <= 100
                             : "downloadStatusPercentage is %s but should be >= 0 and <= 100"
@@ -146,8 +145,8 @@ public class FileDownloaderWithFutureTask {
                     System.out.printf(
                             "%-10s[%-50s] %3s%% %s/s | Downloaded: %s | Total: %s%n",
                             ds.fileName,
-                            "=".repeat(downloadStatusPercentage),
-                            downloadStatusPercentage * 2,
+                            "=".repeat(downloadStatusPercentage / 2),
+                            downloadStatusPercentage,
                             formatBytes(bytesPerSec),
                             formatBytes(ds.downloadedBytes),
                             formatBytes(ds.sizeBytes));
