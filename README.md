@@ -38,3 +38,17 @@ DownloadStatus is used to provide current information about a downloading proces
 The main thread will use DownloadStatus to read status of each downloading file andsend formatted output to the console.                                                                                                
 The DownloadTask can throw a random exception, this will set the status of file downloading to "Error" with an error message" and out put to the console. 
 The main thread can randomly cancel the task which will lead to the status "Cancelled"
+
+# BouncingBallWithSemaphore 
+[vid](https://github.com/user-attachments/assets/777676ff-cfad-4c0c-b0f6-46692e7e9ee1)
+
+A Grid is created with a box inside it. The balls' positions are randomly generated
+as their directions. This box can only contain a limited number of balls. A Semaphore is
+used to provide a permit to a ball to access the box, if the box is full, the permit isn't
+provided which makes the ball bounce off the side.
+                                                                                                  
+There is a certain a number of times a ball should bounce off the sides of the box in order to
+have an access to it besides a permit from the Semaphore. The same goes for when the ball
+is inside the box, it also has to make a certain number of bounces in order to leave it and the
+release the permit.
+
