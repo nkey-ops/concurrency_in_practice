@@ -52,3 +52,16 @@ have an access to it besides a permit from the Semaphore. The same goes for when
 is inside the box, it also has to make a certain number of bounces in order to leave it and the
 release the permit.
 
+# ConwayLifeGameWithCyclicBarrier 
+[vid](https://github.com/user-attachments/assets/3d59778c-fd41-42c6-bfb4-e35cadfce5a1)
+
+Values read from a current board and according to the rules set on a new board, boards are
+swapped after each generation within the Board class.
+                                                                                                  
+A board is split into subboards equal to number of cpu availbale and sent to each worker
+thread to parse it.
+                                                                                                  
+Each worker will share a cyclic barier to signal that it is done with parcing its subboard and
+is ready to parce a new generation when all workers signaled that they are done, one worker make
+the board swap the old table with a new, print updated board to the console and start a another generation
+
