@@ -1,15 +1,15 @@
 package main;
 
 import java.math.BigInteger;
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.FutureTask;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 
 public class MemoizerComparison {
 
@@ -89,9 +89,40 @@ public class MemoizerComparison {
         }
     }
 
+    public static class Memoizer4<A, V> implements Computable<A, V> {
+        private final Map<A, FutureTask<V>> cache = new ConcurrentHashMap<>();
+
+        private final Computable<A, V> c;
+
+        public Memoizer4(Computable<A, V> c) {
+            this.c = c;
+        }
+
+        public V compute(A arg) throws InterruptedException {
+            try {
+                var result = cache.get(arg);
+                if (result == null) {
+                    var ft = new FutureTask<V>(() -> c.compute(arg));
+                    result = cache.putIfAbsent(arg, ft);
+                    if (result == null) {
+                        result = ft;
+                        result.run();
+                    }
+                }
+
+                return result.get();
+            } catch (Exception e) {
+                e.printStackTrace();
+                throw new RuntimeException();
+            }
+        }
+    }
+
     public static void main(String[] args) throws InterruptedException, ExecutionException {
-        int nThreads = 10000;
-        var ex = (ThreadPoolExecutor) Executors.newFixedThreadPool(nThreads);
+        int nThreads = 100_000;
+        int nThreads2 = Runtime.getRuntime().availableProcessors() * 1024 * 2;
+        var ex = 
+        new ThreadPoolExecutor(nThreads2, nThreads2,  60, TimeUnit.SECONDS, new LinkedBlockingQueue<>());
 
         System.out.println("Started");
 
@@ -119,7 +150,14 @@ public class MemoizerComparison {
                                         ex,
                                         new Memoizer3<String, BigInteger>(
                                                 new ExpensiveFunction())));
-
+        var mem4 =
+                new FutureTask<Long>(
+                        () ->
+                                test(
+                                        nThreads,
+                                        ex,
+                                        new Memoizer4<String, BigInteger>(
+                                                new ExpensiveFunction())));
 
         var test2 =
                 new FutureTask<Long>(
@@ -137,18 +175,25 @@ public class MemoizerComparison {
                                         ex,
                                         new Memoizer3<String, BigInteger>(
                                                 new ExpensiveFunction())));
-
+        var test4 =
+                new FutureTask<Long>(
+                        () ->
+                                test(
+                                        nThreads,
+                                        ex,
+                                        new Memoizer4<String, BigInteger>(
+                                                new ExpensiveFunction())));
 
         var seconds = 1;
-
-        // seconds = wait(mem1, seconds, 1);
-        seconds = wait(test3, seconds, -1);
         seconds = wait(test2, seconds, -1);
+        seconds = wait(test3, seconds, -1);
+        seconds = wait(test4, seconds, -1);
+        seconds = wait(mem4, seconds, 4);
         seconds = wait(mem3, seconds, 3);
         seconds = wait(mem2, seconds, 2);
 
         ex.shutdownNow();
-    } 
+    }
 
     private static int wait(FutureTask<Long> mem1, int seconds, int i)
             throws InterruptedException, ExecutionException {
