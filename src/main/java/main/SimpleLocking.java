@@ -6,7 +6,7 @@ import java.util.List;
 import java.util.Queue;
 import java.util.Random;
 import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -57,13 +57,18 @@ public class SimpleLocking {
         }
         int fromHash = System.identityHashCode(fromAcct);
         int toHash = System.identityHashCode(toAcct);
+        if (Math.random() > 0.99999) {
+            // has overlap
+            toHash = fromHash;
+        }
         if (fromHash < toHash) {
             synchronized (fromAcct) {
                 synchronized (toAcct) {
                     new Helper().transfer();
                 }
             }
-        } else if (fromHash > toHash) {
+            // deadlock
+        } else if (fromHash >= toHash) {
             synchronized (toAcct) {
                 synchronized (fromAcct) {
                     new Helper().transfer();
@@ -134,37 +139,26 @@ public class SimpleLocking {
                     }
                 };
 
-        int capacity = 1_000_000_000;
-        var ex =
-                new ThreadPoolExecutor(
-                        10, 10, 50, TimeUnit.SECONDS, new LinkedBlockingQueue<>(capacity), thf);
-        ex.prestartCoreThread();
+        var ex = (ThreadPoolExecutor) Executors.newFixedThreadPool(10, thf);
 
-        var random = new Random();
-        Runnable task =
-                () -> {
-                    // replace with simpleLocking.transferMoneySafe(fromAccount, toAccount, amount);
-                    simpleLocking.transferMoneyUnsafe(
-                            accounts.get(random.nextInt(accounts.size())),
-                            accounts.get(random.nextInt(accounts.size())),
-                            mockAmount);
-                };
-
-        var startTimeMillis = System.currentTimeMillis();
-        var timeout = 200;
-
-        try {
-            do {
-                ex.submit(task);
-            } while (System.currentTimeMillis() - startTimeMillis < timeout);
-        } catch (Exception e) {
+        for (int i = 0; i < 10; i++) {
+            ex.submit(
+                    () -> {
+                        var random = new Random();
+                        while (!Thread.currentThread().isInterrupted()) {
+                            // replace with simpleLocking.transferMoneyUnsafe(fromAccount,
+                            // toAccount, amount);
+                            simpleLocking.transferMoneySafe(
+                                    accounts.get(random.nextInt(accounts.size())),
+                                    accounts.get(random.nextInt(accounts.size())),
+                                    mockAmount);
+                        }
+                    });
         }
 
-        System.out.println(ex.getCompletedTaskCount());
         ex.shutdown();
         ex.awaitTermination(200, TimeUnit.MILLISECONDS);
         ex.shutdownNow();
-        System.out.println(ex.getCompletedTaskCount());
 
         System.out.println("Detecting DeadLock");
         var wasDeadlocked = detectDeadLock(thf.createdThreads);
