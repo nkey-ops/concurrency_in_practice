@@ -267,7 +267,7 @@ public class Server implements AutoCloseable {
 
         var httpMethod =
                 HttpMethod.valueOf(
-                        splitStartLine[0]); // throws exception if it isn't a correct method
+                        splitStartLine[0].toUpperCase()); // throws exception if it isn't a correct method
         var requestTarget = validateRequestTarget(splitStartLine[1]);
 
         var headersOrRequestBody = readHeadersAndBody(reader);
