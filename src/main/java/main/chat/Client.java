@@ -1,7 +1,9 @@
 package main.chat;
 
-import main.chat.Client.ServerConnector.ServerConnectorMessage;
+import main.chat.Client.ServerConnector.ServerMessage;
 import main.chat.Client.UIManager.UIMessage;
+
+import static java.util.Objects.requireNonNull;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -16,15 +18,18 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.logging.Logger;
 
+import javax.swing.undo.UndoManager;
+
 public class Client {
     private static final Logger LOG = Logger.getLogger(Client.class.getName());
 
     private final BlockingQueue<UIMessage> uiMessageQueue = new LinkedBlockingQueue<>();
-    private final BlockingQueue<ServerConnectorMessage> serverMessageQueue = new LinkedBlockingQueue<>();
+    private final BlockingQueue<ServerMessage> serverMessageQueue =
+            new LinkedBlockingQueue<>();
 
-    private final UIManager ui = new UIManager(uiMessageQueue);
-    private final ServerConnector serverConnector = new ServerConnector("127.0.0.1", 8800, serverMessageQueue,
-            uiMessageQueue);
+    private final UIManager ui = new UIManager(serverMessageQueue);
+    private final ServerConnector serverConnector =
+            new ServerConnector("127.0.0.1", 8800, serverMessageQueue, uiMessageQueue);
 
     public static void main(String[] args) {
         new Client().start();
@@ -45,7 +50,12 @@ public class Client {
     }
 
     public static class UIManager implements Runnable {
-        private final BlockingQueue<UIMessage> messageQueue;
+        private final BlockingQueue<ServerMessage> toServerMessageQueue;
+
+
+        public UIManager(BlockingQueue<ServerMessage> toServerMessageQueue) {
+            this.toServerMessageQueue = Objects.requireNonNull(toServerMessageQueue);
+        }
 
         /** Immutable class */
         public static class UIMessage {
@@ -57,6 +67,11 @@ public class Client {
                 }
                 this.lines = Collections.unmodifiableList(Objects.requireNonNull(lines));
             }
+            public UIMessage(String message) {
+                Objects.requireNonNull(message, "The message cannot be null");
+
+                this.lines = List.of(message);
+            }
 
             public List<String> getLines() {
                 return lines;
@@ -66,10 +81,6 @@ public class Client {
             public String toString() {
                 return lines.toString();
             }
-        }
-
-        public UIManager(BlockingQueue<UIMessage> messageQueue) {
-            this.messageQueue = Objects.requireNonNull(messageQueue);
         }
 
         @Override
@@ -88,11 +99,11 @@ public class Client {
                         System.out.printf("%n:> ");
                         continue;
                     }
-                    var uiMsg = new UIMessage(input);
+                    var uiMsg = new ServerMessage(input);
                     LOG.info(uiMsg.toString());
 
                     // print("\033[2K\033[A".repeat(uiMsg.getText().size()));
-                    messageQueue.put(uiMsg);
+                    toServerMessageQueue.put(uiMsg);
                     System.out.printf("%n:> ");
                 }
             } catch (InterruptedException e) {
@@ -103,14 +114,12 @@ public class Client {
         }
 
         /**
-         * Reading input until not a 'Line Feed' is met in the end. The input is split
-         * by line
+         * Reading input until not a 'Line Feed' is met in the end. The input is split by line
          * separator.
          *
          * @param reader to read the input from
          * @return A list of strings that represents input text split by line separator
-         * @throws IOException if there is an issue with reading input from the
-         *                     {@code reader}
+         * @throws IOException if there is an issue with reading input from the {@code reader}
          */
         private List<String> readInput(BufferedReader reader) throws IOException {
             Objects.requireNonNull(reader);
@@ -156,30 +165,30 @@ public class Client {
 
         private final String ipAddress;
         private final int port;
-        private final BlockingQueue<UIMessage> uiMessageQueue;
-        private BlockingQueue<ServerConnectorMessage> serverMessages;
+        private final BlockingQueue<ServerMessage> toServerMessageQueue;
+        private final BlockingQueue<UIMessage> toUIMessageQueue;
 
         public ServerConnector(
                 String ipAddress,
                 int port,
-                BlockingQueue<ServerConnectorMessage> serverMessages,
-                BlockingQueue<UIMessage> uiMessageQueue) {
+                BlockingQueue<ServerMessage> toServerMessageQueue,
+                BlockingQueue<UIMessage> toUiMessageQeueu) {
 
             this.ipAddress = Objects.requireNonNull(ipAddress);
             this.port = port;
-            this.serverMessages = Objects.requireNonNull(serverMessages);
-            this.uiMessageQueue = Objects.requireNonNull(uiMessageQueue);
+            this.toServerMessageQueue = Objects.requireNonNull(toServerMessageQueue);
+            this.toUIMessageQueue = Objects.requireNonNull(toUiMessageQeueu);
         }
 
         /** Immutable class */
-        public static class ServerConnectorMessage {
+        public static class ServerMessage {
             private final List<String> text;
 
-            public ServerConnectorMessage(List<String> text) {
+            public ServerMessage(List<String> text) {
                 this.text = Collections.unmodifiableList(Objects.requireNonNull(text));
             }
 
-            public List<String> getText() {
+            public List<String> getLines() {
                 return text;
             }
 
@@ -193,34 +202,42 @@ public class Client {
         public void run() {
             try {
                 while (!Thread.currentThread().isInterrupted()) {
-                    var msg = uiMessageQueue.take();
+                    var msg = toServerMessageQueue.take();
 
                     var sb = new StringBuilder();
+                    // TODO weird change
                     msg.getLines().forEach(t -> sb.append(t).append("\n"));
                     sb.deleteCharAt(sb.length() - 1);
 
                     LOG.info(sb.toString());
+
                     try (var serverSocket = new Socket(ipAddress, port);
-                            var reader = new BufferedReader(
-                                    new InputStreamReader(serverSocket.getInputStream()));
+                            var reader =
+                                    new BufferedReader(
+                                            new InputStreamReader(serverSocket.getInputStream()));
                             var writer = new PrintStream(serverSocket.getOutputStream())) {
 
-                        LOG.info(
+                        String connectionMessage =
                                 "[%s:%s] | Connected | %s"
                                         .formatted(
                                                 serverSocket.getInetAddress(),
-                                                serverSocket.getPort(), serverSocket.toString()));
+                                                serverSocket.getPort(),
+                                                serverSocket.toString());
+                        LOG.info(connectionMessage);
 
-                        writer.println(sb.toString());
-                        writer.flush();
+                        post(writer, sb.toString());
 
-                        LOG.info(
-                                "[%s:%s] | Disconnected"
-                                        .formatted(
-                                                serverSocket.getInetAddress(),
-                                                serverSocket.getPort()));
+                        String disconnectionMessage = "[%s:%s] | Disconnected"
+                                .formatted(
+                                        serverSocket.getInetAddress(),
+                                        serverSocket.getPort());
+                        LOG.info( disconnectionMessage);
+
+                        toUIMessageQueue.put(new UIMessage(connectionMessage));
                     } catch (Exception e) {
-                        e.printStackTrace();
+                        LOG.info(
+                                "ServerSocket:[ip:%s | port:%s] | Exception | %s"
+                                        .formatted(ipAddress, port, e.getMessage()));
                     }
 
                     try {
@@ -233,5 +250,19 @@ public class Client {
             } catch (Exception e) {
             }
         }
+
+        private void post(PrintStream writer, String data) {
+            requireNonNull(writer);
+            requireNonNull(data);
+
+
+            var sb = new StringBuilder();
+            sb.append("post /messages\r\n");
+            sb.append("\r\n\r\n");
+            sb.append(data);
+
+            writer.print(sb.toString());
+        }
+
     }
 }
