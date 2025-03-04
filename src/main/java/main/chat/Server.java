@@ -21,6 +21,8 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -40,12 +42,29 @@ public class Server implements AutoCloseable {
                     60,
                     TimeUnit.SECONDS,
                     new LinkedBlockingQueue<>(CONNECTION_POOL_SIZE),
-                    new ThreadPoolExecutor.CallerRunsPolicy());
+                    new ThreadPoolExecutor.CallerRunsPolicy()) {
+
+                @Override
+                protected void afterExecute(Runnable r, Throwable t) {
+                    var f = (FutureTask<?>) r;
+                    try {
+                        f.get();
+                        // handling escaped exceptions (i.e assertions) for debugging purposes
+                    } catch (ExecutionException e) {
+                        e.getCause().printStackTrace();
+                    } catch (Exception e) {
+
+                    }
+                }
+            };
+
     private boolean isStarted;
     private boolean isClosed;
     private Optional<Thread> portListener = Optional.empty();
 
+    // db
     private final BlockingQueue<ChatMessage> chatMessages = new LinkedBlockingQueue<>();
+    private final BlockingQueue<HttpRequest> httpRequests = new LinkedBlockingQueue<>();
     private final BlockingQueue<User> chatUsers = new LinkedBlockingQueue<>();
 
     // HTTP management
@@ -201,21 +220,8 @@ public class Server implements AutoCloseable {
             while (!Thread.currentThread().isInterrupted()
                     && (firstLine = reader.readLine()) != null) {
 
-                System.out.println("hi");
-                var httpRequest = parseRequest(firstLine, reader);
-                System.out.println(httpRequest);
-
-                // var list = new LinkedList<String>();
-                // list.add(message);
-                // message = null;
-                // while (reader.ready()) {
-                // list.add(reader.readLine());
-                // }
-
-                // System.out.printf("%s:> %s%n", socketName, list);
-                // System.out.printf("Responsed: [%s]> %s%n", sock, message);
-                // writer.println("Received!");
-                // writer.flush();
+                var httpRequest = parseRequest(socketName, firstLine, reader);
+                handleHttpRequest(httpRequest);
             }
 
         } catch (SocketTimeoutException e) {
@@ -227,6 +233,23 @@ public class Server implements AutoCloseable {
             LOG.warning("%s | Exception | %n[%s] ".formatted(socketName, e.getMessage()));
         } finally {
             LOG.info("%s Disconnected".formatted(socketName, clientSocket));
+        }
+    }
+
+    private void handleHttpRequest(HttpRequest httpRequest) {
+        requireNonNull(httpRequest);
+        LOG.info("%s | Sent Request | %s ".formatted(httpRequest.getSocket(), httpRequest));
+        httpRequests.add(httpRequest);
+
+        var body = httpRequest.getBody();
+        if (body.isPresent()) {
+            char[] data = body.get();
+            chatMessages.add(new ChatMessage(data, new User("", "")));
+
+            System.out.printf(
+                    "%s:> %s%n",
+                    httpRequest.getSocket(),
+                    String.valueOf(data).replaceAll("\n", System.lineSeparator() + " ".repeat(21)));
         }
     }
 
@@ -253,8 +276,9 @@ public class Server implements AutoCloseable {
      *     {@code startLine}
      * @throws IllegalArgumentException if the {@code requestTarget} doesn't exist
      */
-    private static HttpRequest parseRequest(String startLine, BufferedReader reader)
+    private static HttpRequest parseRequest(String socket, String startLine, BufferedReader reader)
             throws IOException {
+        requireNonNull(socket, "Socket cannot be null");
         requireNonNull(startLine, "The startLine cannot be null");
         requireNonNull(reader, "The reader cannot be null");
 
@@ -267,7 +291,8 @@ public class Server implements AutoCloseable {
 
         var httpMethod =
                 HttpMethod.valueOf(
-                        splitStartLine[0].toUpperCase()); // throws exception if it isn't a correct method
+                        splitStartLine[0]
+                                .toUpperCase()); // throws exception if it isn't a correct method
         var requestTarget = validateRequestTarget(splitStartLine[1]);
 
         var headersOrRequestBody = readHeadersAndBody(reader);
@@ -276,30 +301,41 @@ public class Server implements AutoCloseable {
         var headersLength = -1;
         var bodyStartIndex = -1;
 
-        var crlfMatchArray = new boolean[4];
+        var crlfMatch = new boolean[4];
         for (int i = 0; i < headersOrRequestBody.length; i++) {
 
             if (headersOrRequestBody[i] == 13) { // is "CR"
                 // [!CR, !LF, !CR, !LF] || [CR, LF, !CR, !LF]
-                if (!crlfMatchArray[0] || (crlfMatchArray[1] && !crlfMatchArray[2])) {
-                    crlfMatchArray[crlfMatchArray[1] ? 2 : 0] = true;
+                if (!crlfMatch[0] || (crlfMatch[1] && !crlfMatch[2])) {
+                    assert !crlfMatch[0] && !crlfMatch[1] && !crlfMatch[2] && !crlfMatch[3]
+                            || (crlfMatch[0] && crlfMatch[1] && !crlfMatch[2] && !crlfMatch[3]);
+
+                    crlfMatch[crlfMatch[1] ? 2 : 0] = true;
+                } else {
+                    crlfMatch = new boolean[4];
                 }
             } else if (headersOrRequestBody[i] == 10) { // is "LF"
                 // [CR, !LF, !CR, !LF] || [CR, LF, CR, !LF]
-                if (crlfMatchArray[1] || crlfMatchArray[3]) {
+                if ((crlfMatch[0] && !crlfMatch[1]) || crlfMatch[2]) {
+                    assert (crlfMatch[0] && !crlfMatch[1] && !crlfMatch[2] && !crlfMatch[3])
+                            || (crlfMatch[0] && crlfMatch[1] && crlfMatch[2] && !crlfMatch[3]);
 
-                    if (crlfMatchArray[3]) { // last LF, mark headers, body and exit
+                    if (crlfMatch[2]) { // last LF, mark headers, body
                         headersLength = i - 3;
+
                         if (i + 1 < headersOrRequestBody.length) {
                             bodyStartIndex = i + 1;
                         }
+
                         break;
                     } else {
-                        crlfMatchArray[1] = true; // first LF
+                        crlfMatch[1] = true; // first LF
                     }
+                } else {
+                    crlfMatch = new boolean[4];
                 }
             } else {
-                crlfMatchArray = new boolean[4];
+                crlfMatch = new boolean[4];
             }
         }
 
@@ -319,13 +355,13 @@ public class Server implements AutoCloseable {
                                 headersOrRequestBody, bodyStartIndex, headersOrRequestBody.length);
 
         if (headers.isEmpty() && body.length == 0) {
-            return new HttpRequest(httpMethod, requestTarget);
+            return new HttpRequest(socket, httpMethod, requestTarget);
         } else if (headers.isEmpty()) {
-            return new HttpRequest(httpMethod, requestTarget, body);
+            return new HttpRequest(socket, httpMethod, requestTarget, body);
         } else if (body.length == 0) {
-            return new HttpRequest(httpMethod, requestTarget, headers);
+            return new HttpRequest(socket, httpMethod, requestTarget, headers);
         } else {
-            return new HttpRequest(httpMethod, requestTarget, headers, body);
+            return new HttpRequest(socket, httpMethod, requestTarget, headers, body);
         }
     }
 
@@ -359,11 +395,10 @@ public class Server implements AutoCloseable {
 
         for (char[] b : buffList) {
             System.arraycopy(b, 0, data, dataWritePositionIndex, b.length);
-
             dataWritePositionIndex = Math.addExact(dataWritePositionIndex, b.length);
         }
 
-        assert totalSize == dataWritePositionIndex - 1
+        assert totalSize == dataWritePositionIndex
                 : "The positon of last write isn't at the end of the array";
 
         return data;
@@ -385,7 +420,8 @@ public class Server implements AutoCloseable {
      * @return converted {@code data}, if {@code data.length == 0}, an empty map is returned
      * @throws NullPointerException if {@code data} is null
      * @throws IllegalArgumentException if there are less than 3 character for a header
-     * @throws IllegalArgumentException if there are 1 or 2 characters after a header that aren't equal to "CRLF"
+     * @throws IllegalArgumentException if there are 1 or 2 characters after a header that aren't
+     *     equal to "CRLF"
      * @throws IllegalArgumentException if there is a trailing CRLF
      * @throws IllegalArgumentException if the first letter of a headerName isn't "[a-Z]"
      * @throws IllegalArgumentException if the other letter of a headerName isn't "[a-Z-_]"
@@ -423,7 +459,7 @@ public class Server implements AutoCloseable {
                         "There is an incorrect character after a header: '%s'".formatted(data[i]));
             }
 
-            if(i + 1 == data.length) {
+            if (i + 1 == data.length) {
                 throw new IllegalArgumentException("There is a trailing CRLF");
             }
         }
@@ -609,9 +645,10 @@ public class Server implements AutoCloseable {
     }
 
     public static void main(String[] args) throws InterruptedException {
-        var s = new Server();
-        s.start();
-        s.waitTillStop();
+        try (var s = new Server()) {
+            s.start();
+            s.waitTillStop();
+        }
     }
 
     /**
@@ -624,8 +661,8 @@ public class Server implements AutoCloseable {
         private final User user;
 
         public ChatMessage(char[] message, User user) {
-            this.message = message.clone();
-            this.user = user;
+            this.message = requireNonNull(message.clone());
+            this.user = requireNonNull(user);
         }
 
         public char[] getMessage() {
@@ -669,13 +706,16 @@ public class Server implements AutoCloseable {
      * @Immutable
      */
     public static class HttpRequest {
+        private final String socket;
+
         private final HttpMethod method;
         private final String target;
 
         private final Optional<Map<String, String>> headers;
         private final Optional<char[]> body;
 
-        public HttpRequest(HttpMethod method, String target) {
+        public HttpRequest(String socket, HttpMethod method, String target) {
+            this.socket = requireNonNull(socket);
             this.method = requireNonNull(method);
             this.target = requireNonNull(target);
             this.headers = Optional.empty();
@@ -687,7 +727,8 @@ public class Server implements AutoCloseable {
          * @param target
          * @param body of the request. Cannot have length zero
          */
-        public HttpRequest(HttpMethod method, String target, char[] body) {
+        public HttpRequest(String socket, HttpMethod method, String target, char[] body) {
+            this.socket = requireNonNull(socket);
             this.method = requireNonNull(method);
             this.target = requireNonNull(target);
             this.headers = Optional.empty();
@@ -698,7 +739,9 @@ public class Server implements AutoCloseable {
             this.body = Optional.of(requireNonNull(body));
         }
 
-        public HttpRequest(HttpMethod method, String target, Map<String, String> headers) {
+        public HttpRequest(
+                String socket, HttpMethod method, String target, Map<String, String> headers) {
+            this.socket = requireNonNull(socket);
             this.method = requireNonNull(method);
             this.target = requireNonNull(target);
             this.body = Optional.empty();
@@ -712,7 +755,12 @@ public class Server implements AutoCloseable {
          * @param body of the request. Cannot have length zero.
          */
         public HttpRequest(
-                HttpMethod method, String target, Map<String, String> headers, char[] body) {
+                String socket,
+                HttpMethod method,
+                String target,
+                Map<String, String> headers,
+                char[] body) {
+            this.socket = requireNonNull(socket);
             this.method = requireNonNull(method);
             this.target = requireNonNull(target);
             this.headers = Optional.of(new HashMap<>(requireNonNull(headers)));
@@ -721,6 +769,10 @@ public class Server implements AutoCloseable {
                 throw new IllegalArgumentException("The length of the body cannot be zero");
             }
             this.body = Optional.of(requireNonNull(body));
+        }
+
+        public String getSocket() {
+            return socket;
         }
 
         public HttpMethod getMethod() {
@@ -751,9 +803,9 @@ public class Server implements AutoCloseable {
                     + ", target="
                     + target
                     + ", headers="
-                    + headers
+                    + (headers.isPresent() ? headers.get() : headers)
                     + ", body="
-                    + body
+                    + (body.isPresent() ? Arrays.toString(body.get()) : body)
                     + "]";
         }
     }
