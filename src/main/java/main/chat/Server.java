@@ -5,8 +5,11 @@ import static java.util.Objects.requireNonNull;
 import main.chat.Server.HttpRequest.HttpMethod;
 
 import java.io.BufferedReader;
+import java.io.BufferedWriter;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -33,6 +36,7 @@ public class Server implements AutoCloseable {
 
     private final int CONNECTION_POOL_SIZE = 1;
     private final int CLIENT_POOL_SIZE = 1;
+    private final int SERVICE_POOL_SIZE = 2;
 
     // Socket Management
     private final ThreadPoolExecutor clientPool =
@@ -58,9 +62,32 @@ public class Server implements AutoCloseable {
                 }
             };
 
+    private final ThreadPoolExecutor servicePool =
+            new ThreadPoolExecutor(
+                    SERVICE_POOL_SIZE,
+                    SERVICE_POOL_SIZE,
+                    60,
+                    TimeUnit.SECONDS,
+                    new LinkedBlockingQueue<>(SERVICE_POOL_SIZE)) {
+
+                @Override
+                protected void afterExecute(Runnable r, Throwable t) {
+                    var f = (FutureTask<?>) r;
+                    try {
+                        f.get();
+                        // handling escaped exceptions (i.e assertions) for debugging purposes
+                    } catch (ExecutionException e) {
+                        e.getCause().printStackTrace();
+                    } catch (Exception e) {
+
+                    }
+                }
+            };
+
     private boolean isStarted;
     private boolean isClosed;
     private Optional<Thread> portListener = Optional.empty();
+    private Optional<Thread> dataWriter = Optional.empty();
 
     // db
     private final BlockingQueue<ChatMessage> chatMessages = new LinkedBlockingQueue<>();
@@ -86,6 +113,9 @@ public class Server implements AutoCloseable {
 
             portListener = Optional.of(getPortListener(serverSocket));
             portListener.get().start();
+            servicePool.submit(getHttpRequestProcessor(httpRequests, new LinkedBlockingQueue<>()));
+            servicePool.submit(getChatMessageProcessor(chatMessages, new LinkedBlockingQueue<>()));
+
         } catch (Exception e) {
             e.printStackTrace();
         }
@@ -109,6 +139,7 @@ public class Server implements AutoCloseable {
         if (!isStarted) {
             throw new IllegalStateException("Server hass'n been started");
         }
+
         if (isClosed) {
             throw new IllegalStateException("Server has already been closed");
         }
@@ -205,6 +236,83 @@ public class Server implements AutoCloseable {
         };
     }
 
+    private static Runnable getHttpRequestProcessor(
+            BlockingQueue<HttpRequest> httpRequests, BlockingQueue<HttpRequest> dbHttpRequests) {
+        requireNonNull(httpRequests);
+        requireNonNull(dbHttpRequests);
+
+        var requestFile = "./requests.log";
+        return () -> {
+            try (var requestWriter =
+                    new BufferedWriter(new OutputStreamWriter(new FileOutputStream(requestFile)))) {
+
+                while (!Thread.currentThread().isInterrupted()) {
+                    var httpRequest = httpRequests.take();
+                    dbHttpRequests.add(httpRequest);
+
+                    var body = httpRequest.getBody();
+                    var headers = httpRequest.getHeaders();
+
+                    var msg =
+                            "[%s] | %.5s | %s | %s%n"
+                                    .formatted(
+                                            httpRequest.getSocket(),
+                                            httpRequest.getMethod(),
+                                            headers.isPresent() ? headers.get() : "[]",
+                                            body.isPresent() ? Arrays.toString(body.get()) : "[]");
+
+                    requestWriter.write(msg);
+                    requestWriter.flush();
+                }
+
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                LOG.warning("%s was interrupted".formatted(Thread.currentThread().getName()));
+            } catch (Exception e) {
+                LOG.severe(
+                        "%s throws |  %s"
+                                .formatted(Thread.currentThread().getName(), e.getMessage()));
+            }
+        };
+    }
+
+    private static Runnable getChatMessageProcessor(
+            BlockingQueue<ChatMessage> chatMessages, BlockingQueue<ChatMessage> dbChatMessages) {
+        requireNonNull(chatMessages);
+        requireNonNull(dbChatMessages);
+
+        var chatMessagesFile = "./chat.log";
+        return () -> {
+            try (var chatWriter =
+                    new BufferedWriter(
+                            new OutputStreamWriter(new FileOutputStream(chatMessagesFile)))) {
+
+                while (!Thread.currentThread().isInterrupted()) {
+                    var chatMessage = chatMessages.take();
+                    dbChatMessages.add(chatMessage);
+
+                    var username = chatMessage.getUser().getUsername();
+                    var message =
+                            String.valueOf(chatMessage.getMessage())
+                                    .replaceAll("\n", "\n" + " ".repeat(username.length() + 7 ));
+
+                    var msg = "[%s] :> %s%n".formatted(username, message);
+
+                    chatWriter.write(msg);
+                    chatWriter.flush();
+                }
+
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                LOG.warning("%s was interrupted".formatted(Thread.currentThread().getName()));
+            } catch (Exception e) {
+                LOG.severe(
+                        "%s throws |  %s"
+                                .formatted(Thread.currentThread().getName(), e.getMessage()));
+            }
+        };
+    }
+
     private void handleConnection(Socket clientSocket) {
         requireNonNull(clientSocket);
         var socketName = "[%s:%s]".formatted(clientSocket.getInetAddress(), clientSocket.getPort());
@@ -238,7 +346,7 @@ public class Server implements AutoCloseable {
 
     private void handleHttpRequest(HttpRequest httpRequest) {
         requireNonNull(httpRequest);
-        LOG.info("%s | Sent Request | %s ".formatted(httpRequest.getSocket(), httpRequest));
+        LOG.info("%s | Received Request | %s ".formatted(httpRequest.getSocket(), httpRequest));
         httpRequests.add(httpRequest);
 
         var body = httpRequest.getBody();
@@ -784,11 +892,11 @@ public class Server implements AutoCloseable {
         }
 
         public Optional<Map<String, String>> getHeaders() {
-            return Optional.of(new HashMap<>(headers.get()));
+            return headers.isPresent() ? Optional.of(new HashMap<>(headers.get())) : headers;
         }
 
         public Optional<char[]> getBody() {
-            return Optional.of(body.get().clone());
+            return body.isPresent()  ? Optional.of(body.get().clone()) : body;
         }
 
         public static enum HttpMethod {
