@@ -1,35 +1,46 @@
 package main.chat;
 
-import main.chat.Client.ServerConnector.ServerMessage;
-import main.chat.Client.UIManager.UIMessage;
-
 import static java.util.Objects.requireNonNull;
 
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
 import java.io.PrintStream;
 import java.net.Socket;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.Future;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 
-import javax.swing.undo.UndoManager;
+import main.chat.Client.InputManager.InputMassage;
+import main.chat.Client.InputManager.InputMassageResponse;
+import main.chat.Client.ServerConnector.ServerMessage;
+import main.chat.Client.UIManager.UIMessage;
 
 public class Client {
     private static final Logger LOG = Logger.getLogger(Client.class.getName());
 
-    private final BlockingQueue<UIMessage> uiMessageQueue = new LinkedBlockingQueue<>();
-    private final BlockingQueue<ServerMessage> serverMessageQueue =
-            new LinkedBlockingQueue<>();
+    private final BlockingQueue<UIMessage> toUIMessageQueue = new LinkedBlockingQueue<>();
+    private final BlockingQueue<ServerMessage> toServerMessageQueue = new LinkedBlockingQueue<>();
 
-    private final UIManager ui = new UIManager(serverMessageQueue);
+    private BlockingQueue<InputMassage> inputToUImanager = new LinkedBlockingQueue<>();
+    private BlockingQueue<InputMassageResponse> uiManagerToInput = new LinkedBlockingQueue<>();
+
+    private final InputManager inputManager = new InputManager(inputToUImanager, uiManagerToInput);
+    private final UIManager ui =
+            new UIManager(
+                    toServerMessageQueue, toUIMessageQueue, inputToUImanager, uiManagerToInput);
     private final ServerConnector serverConnector =
-            new ServerConnector("127.0.0.1", 8800, serverMessageQueue, uiMessageQueue);
+            new ServerConnector("127.0.0.1", 8800, toServerMessageQueue, toUIMessageQueue);
 
     public static void main(String[] args) {
         new Client().start();
@@ -38,24 +49,152 @@ public class Client {
     private void start() {
         var uiManager = new Thread(ui);
         var tServerConnector = new Thread(serverConnector);
+        var tInputManager = new Thread(inputManager);
 
         uiManager.start();
         tServerConnector.start();
+        tInputManager.start();
         try {
             uiManager.join();
             tServerConnector.join();
+            tInputManager.join();
         } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
+    }
 
+    public static class InputManager implements Runnable {
+
+        private BlockingQueue<InputMassage> toUIManager;
+        private BlockingQueue<InputMassageResponse> toInputManager;
+
+        public InputManager(
+                BlockingQueue<InputMassage> toUIManager,
+                BlockingQueue<InputMassageResponse> toInputManager) {
+            this.toUIManager = requireNonNull(toUIManager);
+            this.toInputManager = requireNonNull(toInputManager);
+        }
+
+        public static class InputMassage {
+            private char[] buff;
+
+            public char[] getBuff() {
+                return buff;
+            }
+
+            public InputMassage(char[] buff) {
+                this.buff = buff;
+            }
+        }
+
+        public static class InputMassageResponse {
+
+            public InputMassageResponse() {}
+        }
+
+        @Override
+        public void run() {
+            try {
+                LOG.log(Level.FINEST, "Waiting for a suart request from UIManager ");
+                var startRequest = toInputManager.take();
+                LOG.log(Level.FINEST, "Received a start request '{}' from UIManager", startRequest);
+
+                var reader = new BufferedReader(new InputStreamReader(System.in));
+                while (!Thread.currentThread().isInterrupted()) {
+                    if (!reader.ready()) {
+                        Thread.sleep(2_000);
+                        continue;
+                    }
+
+                    var input = readInput(reader);
+                    if (input.length == 0) {
+                        continue;
+                    }
+
+                    var inputMassage = new InputMassage(input);
+                    LOG.log(Level.FINEST, "Sending {} to UIManager", inputMassage);
+                    toUIManager.put(inputMassage);
+                    LOG.log(Level.FINEST, "Waiting a response from UIManager to {} ", inputMassage);
+                    var response = toInputManager.take();
+                    LOG.log(
+                            Level.FINEST,
+                            "Received a response '{}' from UIManager to '{}' ",
+                            new Object[] {response, inputMassage});
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                LOG.warning("%s was interrupted".formatted(Thread.currentThread()));
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }
+
+        /**
+         * Reading input until not a 'Line Feed' is met in the end.
+         *
+         * @param reader to read the input from
+         * @return An array of characters that represents input text, if there is no input an array
+         *     with {@code length 0} is returned
+         * @throws IOException if there is an issue with reading input from the {@code reader}
+         */
+        private static char[] readInput(BufferedReader reader) throws IOException {
+            requireNonNull(reader);
+
+            var buffs = new LinkedList<char[]>();
+
+            // TODO initialize once
+            var charBuff = new char[1024];
+            // TODO if new line separator equals "\n\r" and it is split between two char
+            // buffs we are cooked
+
+            var totalLength = 0;
+            while (reader.ready()) {
+                var length = reader.read(charBuff);
+                totalLength = Math.addExact(totalLength, length);
+                buffs.add(length == charBuff.length ? charBuff : Arrays.copyOf(charBuff, length));
+
+                // if last char is not line feed then stop reading
+                if (charBuff[length - 1] != 10) {
+                    break;
+                }
+
+                charBuff = new char[1024];
+            }
+
+            assert !reader.ready();
+
+            var input = new char[totalLength];
+            var nextInputWriteIndex = 0;
+            for (var buff : buffs) {
+                System.arraycopy(buff, 0, input, nextInputWriteIndex, buff.length);
+                nextInputWriteIndex = Math.addExact(nextInputWriteIndex, buff.length);
+            }
+
+            assert nextInputWriteIndex == totalLength;
+
+            return input;
         }
     }
 
     public static class UIManager implements Runnable {
-        private final BlockingQueue<ServerMessage> toServerMessageQueue;
+        private final BlockingQueue<ServerMessage> serverMessageQueue;
+        private final BlockingQueue<UIMessage> toUIManagerQueue;
+        private BlockingQueue<InputMassage> inputToUImanager;
+        private BlockingQueue<InputMassageResponse> toInputManagerQueue;
 
+        public UIManager(
+                BlockingQueue<ServerMessage> toServerMessageQueue,
+                BlockingQueue<UIMessage> toUIManager,
+                BlockingQueue<InputMassage> inputToUImanager,
+                BlockingQueue<InputMassageResponse> uiManagerToInput) {
 
-        public UIManager(BlockingQueue<ServerMessage> toServerMessageQueue) {
-            this.toServerMessageQueue = Objects.requireNonNull(toServerMessageQueue);
+            this.serverMessageQueue = requireNonNull(toServerMessageQueue);
+            this.toUIManagerQueue = requireNonNull(toUIManager);
+            this.inputToUImanager = requireNonNull(inputToUImanager);
+            this.toInputManagerQueue = requireNonNull(uiManagerToInput);
         }
+
+        public static class UIInputRequest {}
 
         /** Immutable class */
         public static class UIMessage {
@@ -67,6 +206,7 @@ public class Client {
                 }
                 this.lines = Collections.unmodifiableList(Objects.requireNonNull(lines));
             }
+
             public UIMessage(String message) {
                 Objects.requireNonNull(message, "The message cannot be null");
 
@@ -85,66 +225,100 @@ public class Client {
 
         @Override
         public void run() {
-            var reader = new BufferedReader(new InputStreamReader(System.in));
             try {
-                System.out.print(":> ");
+
+                var startResponce = new InputMassageResponse();
+                LOG.log(
+                        Level.FINEST,
+                        "Sending: '{}' to InputManager as starting request",
+                        startResponce);
+                toInputManagerQueue.put(startResponce);
+
+                System.out.printf("%n:> ");
                 while (!Thread.currentThread().isInterrupted()) {
-                    if (!reader.ready()) {
-                        Thread.sleep(2_000);
-                        continue;
+
+                    var inputMassage = inputToUImanager.poll(1, TimeUnit.SECONDS);
+                    if (inputMassage != null) {
+                        LOG.log(Level.FINEST, "Received :'{}' from InputManager", inputMassage);
+                        var serverMessage = new ServerMessage(inputMassage.getBuff());
+
+                        LOG.log(Level.FINEST, "Sending: '{}', to {}", new Object[]{serverMessage, ServerConnector.class});
+                        serverMessageQueue.put(serverMessage);
+
+                        var blocker = blockInput();
+                        Thread.sleep(5000);
+                        blocker.cancel(true);
+
+                        var inputMResponse = new InputMassageResponse();
+                        LOG.log(Level.FINEST, "Sending: '{}' to InputManager", inputMResponse);
+                        toInputManagerQueue.put(inputMResponse);
+                        //
+                        // LOG.log(Level.FINEST, "Waiting: {} to respond to: '{}'", new Object[]{ServerConnector.class});
+                        //
+                        // LOG.log(Level.FINEST, "Waiting: {} to respond to: '{}'", new Object[]{ServerConnector.class});
+
+                        System.out.printf(" %n:> ");
                     }
 
-                    List<String> input = readInput(reader);
-                    if (input.isEmpty()) {
-                        System.out.printf("%n:> ");
-                        continue;
-                    }
-                    var uiMsg = new ServerMessage(input);
-                    LOG.info(uiMsg.toString());
-
-                    // print("\033[2K\033[A".repeat(uiMsg.getText().size()));
-                    toServerMessageQueue.put(uiMsg);
-                    System.out.printf("%n:> ");
+                    //
+                    // List<String> input = readInput(reader);
+                    // if (input.isEmpty()) {
+                    //     System.out.printf("%n:> ");
+                    //     continue;
+                    // }
+                    //
+                    // var uiMsg = new ServerMessage(input);
+                    // LOG.info(uiMsg.toString());
+                    //
+                    // // print("\033[2K\033[A".repeat(uiMsg.getText().size()));
+                    // toServerMessageQueue.put(uiMsg);
+                    //
+                    // var blocker = blockInput();
+                    // Thread.sleep(5000);
+                    // // var responce = toUIManagerQueue.take();
+                    // blocker.cancel(true);
+                    //
+                    // System.out.printf("%n:> ");
                 }
             } catch (InterruptedException e) {
+                e.printStackTrace();
                 Thread.currentThread().interrupt();
             } catch (Exception e) {
                 e.printStackTrace();
             }
         }
 
-        /**
-         * Reading input until not a 'Line Feed' is met in the end. The input is split by line
-         * separator.
-         *
-         * @param reader to read the input from
-         * @return A list of strings that represents input text split by line separator
-         * @throws IOException if there is an issue with reading input from the {@code reader}
-         */
-        private List<String> readInput(BufferedReader reader) throws IOException {
-            Objects.requireNonNull(reader);
+        private Future<Void> blockInput() {
+            final var load = new char[] {'|', '/', '-', '\\'};
 
-            var result = new LinkedList<String>();
+            var future =
+                    new FutureTask<Void>(
+                            () -> {
+                                var out = new OutputStreamWriter(System.out);
+                                int i = 0;
+                                try {
+                                    while (!Thread.currentThread().isInterrupted()) {
 
-            // TODO initialize once
-            var charBuff = new char[100];
-            // TODO if new line separator equals "\n\r" and it is split between two char
-            // buffs we are cooked
-            var length = 0;
-            while ((length = reader.read(charBuff)) != -1) {
-                var lines = String.valueOf(charBuff, 0, length).split(System.lineSeparator());
-                for (var line : lines) {
-                    result.add(line);
-                }
+                                        out.write(load[i++]);
+                                        out.write("\033[D");
+                                        out.flush();
 
-                // if last char is not line feed then stop reading
-                if (charBuff[length - 1] != 10) {
-                    break;
-                }
-            }
+                                        if (i >= load.length) {
+                                            i = 0;
+                                        }
 
-            assert !reader.ready();
-            return result;
+                                        Thread.sleep(500);
+                                    }
+                                    out.write("\033[J");
+                                } catch (InterruptedException e) {
+                                } catch (Exception e) {
+                                    LOG.log(Level.SEVERE,"Encountered exception in blockInput()",e );
+                                }
+                            },
+                            null);
+            new Thread(future).start();
+
+            return future;
         }
 
         private synchronized void print(List<String> msgs) {
@@ -182,19 +356,19 @@ public class Client {
 
         /** Immutable class */
         public static class ServerMessage {
-            private final List<String> text;
+            private final char[] data;
 
-            public ServerMessage(List<String> text) {
-                this.text = Collections.unmodifiableList(Objects.requireNonNull(text));
+            public ServerMessage(char[] data) {
+                this.data = requireNonNull(data).clone();
             }
 
-            public List<String> getLines() {
-                return text;
+            public char[] getData() {
+                return data.clone();
             }
 
             @Override
             public String toString() {
-                return text.toString();
+                return data.toString();
             }
         }
 
@@ -203,13 +377,6 @@ public class Client {
             try {
                 while (!Thread.currentThread().isInterrupted()) {
                     var msg = toServerMessageQueue.take();
-
-                    var sb = new StringBuilder();
-                    // TODO weird change
-                    msg.getLines().forEach(t -> sb.append(t).append("\n"));
-                    sb.deleteCharAt(sb.length() - 1);
-
-                    LOG.info(sb.toString());
 
                     try (var serverSocket = new Socket(ipAddress, port);
                             var reader =
@@ -225,15 +392,16 @@ public class Client {
                                                 serverSocket.toString());
                         LOG.info(connectionMessage);
 
-                        post(writer, sb.toString());
+                        post(writer, msg.getData());
 
-                        String disconnectionMessage = "[%s:%s] | Disconnected"
-                                .formatted(
-                                        serverSocket.getInetAddress(),
-                                        serverSocket.getPort());
-                        LOG.info( disconnectionMessage);
+                        String disconnectionMessage =
+                                "[%s:%s] | Disconnected"
+                                        .formatted(
+                                                serverSocket.getInetAddress(),
+                                                serverSocket.getPort());
+                        LOG.info(disconnectionMessage);
 
-                        toUIMessageQueue.put(new UIMessage(connectionMessage));
+                        // toUIMessageQueue.put(new UIMessage(connectionMessage));
                     } catch (Exception e) {
                         LOG.info(
                                 "ServerSocket:[ip:%s | port:%s] | Exception | %s"
@@ -251,10 +419,9 @@ public class Client {
             }
         }
 
-        private void post(PrintStream writer, String data) {
+        private void post(PrintStream writer, char[] data) {
             requireNonNull(writer);
             requireNonNull(data);
-
 
             var sb = new StringBuilder();
             sb.append("post /messages\r\n");
@@ -263,6 +430,5 @@ public class Client {
 
             writer.print(sb.toString());
         }
-
     }
 }
