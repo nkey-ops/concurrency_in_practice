@@ -2,8 +2,6 @@ package main.chat;
 
 import static java.util.Objects.requireNonNull;
 
-import main.chat.Server.HttpRequest.HttpMethod;
-
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
 import java.io.FileOutputStream;
@@ -29,10 +27,18 @@ import java.util.concurrent.FutureTask;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.logging.Level;
 import java.util.logging.Logger;
+
+import main.chat.Server.HttpRequest.HttpMethod;
 
 public class Server implements AutoCloseable {
     private static final Logger LOG = Logger.getLogger(Server.class.getName());
+
+    {
+        LOG.setLevel(Level.FINEST);
+        Logger.getLogger("").getHandlers()[0].setLevel(Level.FINEST);
+    }
 
     private final int CONNECTION_POOL_SIZE = 1;
     private final int CLIENT_POOL_SIZE = 1;
@@ -256,7 +262,7 @@ public class Server implements AutoCloseable {
                     var msg =
                             "[%s] | %.5s | %s | %s%n"
                                     .formatted(
-                                            httpRequest.getSocket(),
+                                            httpRequest.getSocketName(),
                                             httpRequest.getMethod(),
                                             headers.isPresent() ? headers.get() : "[]",
                                             body.isPresent() ? Arrays.toString(body.get()) : "[]");
@@ -294,7 +300,7 @@ public class Server implements AutoCloseable {
                     var username = chatMessage.getUser().getUsername();
                     var message =
                             String.valueOf(chatMessage.getMessage())
-                                    .replaceAll("\n", "\n" + " ".repeat(username.length() + 7 ));
+                                    .replaceAll("\n", "\n" + " ".repeat(username.length() + 7));
 
                     var msg = "[%s] :> %s%n".formatted(username, message);
 
@@ -328,8 +334,26 @@ public class Server implements AutoCloseable {
             while (!Thread.currentThread().isInterrupted()
                     && (firstLine = reader.readLine()) != null) {
 
-                var httpRequest = parseRequest(socketName, firstLine, reader);
-                handleHttpRequest(httpRequest);
+                var statusCode = 500;
+                var message = "BAD";
+                try {
+                    var httpRequest = parseRequest(socketName, firstLine, reader);
+                    LOG.info(
+                            "%s | Received Request | %s"
+                                    .formatted(httpRequest.getSocketName(), httpRequest));
+                    handleHttpRequest(httpRequest);
+                    statusCode = 100;
+                    message = "OK";
+                } catch (IllegalArgumentException e) {
+                    statusCode = 500;
+                    message = e.getMessage();
+                }finally {
+                    String response = "%s %s%n".formatted(statusCode, message);
+                    LOG.info("%s | Sent Response | %s".formatted(socketName, response));
+                    writer.write(response);
+                    writer.flush();
+                }
+
             }
 
         } catch (SocketTimeoutException e) {
@@ -346,7 +370,6 @@ public class Server implements AutoCloseable {
 
     private void handleHttpRequest(HttpRequest httpRequest) {
         requireNonNull(httpRequest);
-        LOG.info("%s | Received Request | %s ".formatted(httpRequest.getSocket(), httpRequest));
         httpRequests.add(httpRequest);
 
         var body = httpRequest.getBody();
@@ -356,7 +379,7 @@ public class Server implements AutoCloseable {
 
             System.out.printf(
                     "%s:> %s%n",
-                    httpRequest.getSocket(),
+                    httpRequest.getSocketName(),
                     String.valueOf(data).replaceAll("\n", System.lineSeparator() + " ".repeat(21)));
         }
     }
@@ -375,7 +398,7 @@ public class Server implements AutoCloseable {
      * request = headers + CRLF + CRLF + body
      * </pre>
      *
-     * @param startLine should have two paramenters: {@link HttpMethod} and {@link
+     * @param requestLine should have two paramenters: {@link HttpMethod} and {@link
      *     HttpRequest#target}
      * @param reader to read other data from. Will NEVER be closed.
      * @return parced request
@@ -384,17 +407,17 @@ public class Server implements AutoCloseable {
      *     {@code startLine}
      * @throws IllegalArgumentException if the {@code requestTarget} doesn't exist
      */
-    private static HttpRequest parseRequest(String socket, String startLine, BufferedReader reader)
-            throws IOException {
-        requireNonNull(socket, "Socket cannot be null");
-        requireNonNull(startLine, "The startLine cannot be null");
+    private static HttpRequest parseRequest(
+            String socketName, String requestLine, BufferedReader reader) throws IOException {
+        requireNonNull(socketName, "Socket cannot be null");
+        requireNonNull(requestLine, "The startLine cannot be null");
         requireNonNull(reader, "The reader cannot be null");
 
-        var splitStartLine = startLine.split(" ");
+        var splitStartLine = requestLine.split(" ");
 
         if (splitStartLine.length != 2) {
             throw new IllegalArgumentException(
-                    "Didn't find two space separated parameters".formatted(startLine));
+                    "Didn't find two space separated parameters".formatted(requestLine));
         }
 
         var httpMethod =
@@ -404,6 +427,14 @@ public class Server implements AutoCloseable {
         var requestTarget = validateRequestTarget(splitStartLine[1]);
 
         var headersOrRequestBody = readHeadersAndBody(reader);
+
+        LOG.finest(
+                """
+                Received Data: Socket: %s
+                %s
+                %s
+                """
+                        .formatted(socketName, requestLine, Arrays.toString(headersOrRequestBody)));
 
         // headers and body are separated by "CRLFCRLF"
         var headersLength = -1;
@@ -463,13 +494,13 @@ public class Server implements AutoCloseable {
                                 headersOrRequestBody, bodyStartIndex, headersOrRequestBody.length);
 
         if (headers.isEmpty() && body.length == 0) {
-            return new HttpRequest(socket, httpMethod, requestTarget);
+            return new HttpRequest(socketName, httpMethod, requestTarget);
         } else if (headers.isEmpty()) {
-            return new HttpRequest(socket, httpMethod, requestTarget, body);
+            return new HttpRequest(socketName, httpMethod, requestTarget, body);
         } else if (body.length == 0) {
-            return new HttpRequest(socket, httpMethod, requestTarget, headers);
+            return new HttpRequest(socketName, httpMethod, requestTarget, headers);
         } else {
-            return new HttpRequest(socket, httpMethod, requestTarget, headers, body);
+            return new HttpRequest(socketName, httpMethod, requestTarget, headers, body);
         }
     }
 
@@ -486,7 +517,8 @@ public class Server implements AutoCloseable {
 
         var buff = new char[1024];
         var buffList = new LinkedList<char[]>();
-        var totalSize = 0;
+        buffList.add(new char[]{'\r','\n'});
+        var totalSize = 2;
 
         while (reader.ready()) {
             var length = reader.read(buff);
@@ -550,7 +582,7 @@ public class Server implements AutoCloseable {
                 throw new IllegalArgumentException("There are less than 3 characters for a header");
             }
 
-            i = convertHeaderLine(data, i, headers);
+            i = convertHeader(data, i, headers);
 
             if (i == data.length) {
                 break;
@@ -602,7 +634,7 @@ public class Server implements AutoCloseable {
      * @throws IllegalArgumentException if the parsed header was already present in the {@code
      *     headers}
      */
-    private static int convertHeaderLine(
+    private static int convertHeader(
             char[] data, int startIndex, HashMap<String, String> headers) {
         requireNonNull(data);
         requireNonNull(headers);
@@ -634,7 +666,7 @@ public class Server implements AutoCloseable {
             if (headerNameStartIndex == -1) {
                 if (!Character.isLetter(ch)) {
                     throw new IllegalArgumentException(
-                            "Incorrect character: '%s' in a first letter of the header name."
+                            "Incorrect character: '%s' in a first letter of the header name.".formatted(ch)
                                     + " Allowed 'a-zA-Z'");
                 }
 
@@ -646,7 +678,7 @@ public class Server implements AutoCloseable {
 
             // 2. Parse the header name and search for its end
             if (headerNameEndIndex == -1) {
-                assert headerNameStartIndex < startIndex;
+                assert headerNameStartIndex < j;
 
                 // reached the end of the header name;
                 if (ch == ':') {
@@ -670,7 +702,7 @@ public class Server implements AutoCloseable {
                 if (!Character.isLetter(ch)) {
                     throw new IllegalArgumentException(
                             "Incorrect character: '%s' in a first letter of the header value."
-                                    + " Allowed 'a-zA-Z'");
+                                    + " Allowed 'a-zA-Z'".formatted(ch));
                 }
 
                 headerValueStartIndex = startIndex;
@@ -681,7 +713,7 @@ public class Server implements AutoCloseable {
 
             // 4. Parse the header value and search for its end
             if (headerValueEndIndex == -1) {
-                assert headerValueStartIndex < startIndex;
+                assert headerValueStartIndex < j;
 
                 // reached the end of the header value;
                 if (ch == 13) { // it's CR
@@ -814,7 +846,7 @@ public class Server implements AutoCloseable {
      * @Immutable
      */
     public static class HttpRequest {
-        private final String socket;
+        private final String socketName;
 
         private final HttpMethod method;
         private final String target;
@@ -822,8 +854,8 @@ public class Server implements AutoCloseable {
         private final Optional<Map<String, String>> headers;
         private final Optional<char[]> body;
 
-        public HttpRequest(String socket, HttpMethod method, String target) {
-            this.socket = requireNonNull(socket);
+        public HttpRequest(String socketName, HttpMethod method, String target) {
+            this.socketName = requireNonNull(socketName);
             this.method = requireNonNull(method);
             this.target = requireNonNull(target);
             this.headers = Optional.empty();
@@ -835,8 +867,8 @@ public class Server implements AutoCloseable {
          * @param target
          * @param body of the request. Cannot have length zero
          */
-        public HttpRequest(String socket, HttpMethod method, String target, char[] body) {
-            this.socket = requireNonNull(socket);
+        public HttpRequest(String socketName, HttpMethod method, String target, char[] body) {
+            this.socketName = requireNonNull(socketName);
             this.method = requireNonNull(method);
             this.target = requireNonNull(target);
             this.headers = Optional.empty();
@@ -848,8 +880,8 @@ public class Server implements AutoCloseable {
         }
 
         public HttpRequest(
-                String socket, HttpMethod method, String target, Map<String, String> headers) {
-            this.socket = requireNonNull(socket);
+                String socketName, HttpMethod method, String target, Map<String, String> headers) {
+            this.socketName = requireNonNull(socketName);
             this.method = requireNonNull(method);
             this.target = requireNonNull(target);
             this.body = Optional.empty();
@@ -863,12 +895,12 @@ public class Server implements AutoCloseable {
          * @param body of the request. Cannot have length zero.
          */
         public HttpRequest(
-                String socket,
+                String socketName,
                 HttpMethod method,
                 String target,
                 Map<String, String> headers,
                 char[] body) {
-            this.socket = requireNonNull(socket);
+            this.socketName = requireNonNull(socketName);
             this.method = requireNonNull(method);
             this.target = requireNonNull(target);
             this.headers = Optional.of(new HashMap<>(requireNonNull(headers)));
@@ -879,8 +911,8 @@ public class Server implements AutoCloseable {
             this.body = Optional.of(requireNonNull(body));
         }
 
-        public String getSocket() {
-            return socket;
+        public String getSocketName() {
+            return socketName;
         }
 
         public HttpMethod getMethod() {
@@ -896,7 +928,7 @@ public class Server implements AutoCloseable {
         }
 
         public Optional<char[]> getBody() {
-            return body.isPresent()  ? Optional.of(body.get().clone()) : body;
+            return body.isPresent() ? Optional.of(body.get().clone()) : body;
         }
 
         public static enum HttpMethod {
