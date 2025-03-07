@@ -2,6 +2,11 @@ package main.chat;
 
 import static java.util.Objects.requireNonNull;
 
+import main.chat.Client.InputManager.InputMassage;
+import main.chat.Client.InputManager.InputMassageResponse;
+import main.chat.Client.ServerConnector.ServerMessage;
+import main.chat.Client.UIManager.UIMessage;
+
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
@@ -20,11 +25,6 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
-
-import main.chat.Client.InputManager.InputMassage;
-import main.chat.Client.InputManager.InputMassageResponse;
-import main.chat.Client.ServerConnector.ServerMessage;
-import main.chat.Client.UIManager.UIMessage;
 
 public class Client {
     private static final Logger LOG = Logger.getLogger(Client.class.getName());
@@ -99,12 +99,8 @@ public class Client {
                 var startRequest = toInputManager.take();
                 LOG.log(Level.FINEST, "Received a start request '{}' from UIManager", startRequest);
 
-                var reader = new BufferedReader(new InputStreamReader(System.in));
+                var reader = new InputStreamReader(System.in);
                 while (!Thread.currentThread().isInterrupted()) {
-                    if (!reader.ready()) {
-                        Thread.sleep(2_000);
-                        continue;
-                    }
 
                     var input = readInput(reader);
                     if (input.length == 0) {
@@ -112,8 +108,10 @@ public class Client {
                     }
 
                     var inputMassage = new InputMassage(input);
+
                     LOG.log(Level.FINEST, "Sending {} to UIManager", inputMassage);
                     toUIManager.put(inputMassage);
+
                     LOG.log(Level.FINEST, "Waiting a response from UIManager to {} ", inputMassage);
                     var response = toInputManager.take();
                     LOG.log(
@@ -136,8 +134,10 @@ public class Client {
          * @return An array of characters that represents input text, if there is no input an array
          *     with {@code length 0} is returned
          * @throws IOException if there is an issue with reading input from the {@code reader}
+         * @throws InterruptedException if interruption occurs
          */
-        private static char[] readInput(BufferedReader reader) throws IOException {
+        private static char[] readInput(InputStreamReader reader)
+                throws IOException, InterruptedException {
             requireNonNull(reader);
 
             var buffs = new LinkedList<char[]>();
@@ -148,8 +148,17 @@ public class Client {
             // buffs we are cooked
 
             var totalLength = 0;
-            while (reader.ready()) {
+            while (!Thread.currentThread().isInterrupted()) {
+                if (!reader.ready()) {
+                    Thread.sleep(2_000);
+                    continue;
+                }
+
                 var length = reader.read(charBuff);
+                if (length == -1) {
+                    break;
+                }
+
                 totalLength = Math.addExact(totalLength, length);
                 buffs.add(length == charBuff.length ? charBuff : Arrays.copyOf(charBuff, length));
 
@@ -160,8 +169,6 @@ public class Client {
 
                 charBuff = new char[1024];
             }
-
-            assert !reader.ready();
 
             var input = new char[totalLength];
             var nextInputWriteIndex = 0;
@@ -227,12 +234,12 @@ public class Client {
         public void run() {
             try {
 
-                var startResponce = new InputMassageResponse();
+                var startResponse = new InputMassageResponse();
                 LOG.log(
                         Level.FINEST,
                         "Sending: '{}' to InputManager as starting request",
-                        startResponce);
-                toInputManagerQueue.put(startResponce);
+                        startResponse);
+                toInputManagerQueue.put(startResponse);
 
                 System.out.printf("%n:> ");
                 while (!Thread.currentThread().isInterrupted()) {
@@ -240,24 +247,33 @@ public class Client {
                     var inputMassage = inputToUImanager.poll(1, TimeUnit.SECONDS);
                     if (inputMassage != null) {
                         LOG.log(Level.FINEST, "Received :'{}' from InputManager", inputMassage);
+
                         var serverMessage = new ServerMessage(inputMassage.getBuff());
 
-                        LOG.log(Level.FINEST, "Sending: '{}', to {}", new Object[]{serverMessage, ServerConnector.class});
+                        LOG.log(
+                                Level.FINEST,
+                                "Sending: '{}', to {}",
+                                new Object[] {serverMessage, ServerConnector.class});
                         serverMessageQueue.put(serverMessage);
 
+                        System.out.printf("%n:");
+
                         var blocker = blockInput();
-                        Thread.sleep(5000);
+                        Thread.sleep(10000);
                         blocker.cancel(true);
+
+                        System.out.print("> ");
 
                         var inputMResponse = new InputMassageResponse();
                         LOG.log(Level.FINEST, "Sending: '{}' to InputManager", inputMResponse);
                         toInputManagerQueue.put(inputMResponse);
                         //
-                        // LOG.log(Level.FINEST, "Waiting: {} to respond to: '{}'", new Object[]{ServerConnector.class});
+                        // LOG.log(Level.FINEST, "Waiting: {} to respond to: '{}'", new
+                        // Object[]{ServerConnector.class});
                         //
-                        // LOG.log(Level.FINEST, "Waiting: {} to respond to: '{}'", new Object[]{ServerConnector.class});
+                        // LOG.log(Level.FINEST, "Waiting: {} to respond to: '{}'", new
+                        // Object[]{ServerConnector.class});
 
-                        System.out.printf(" %n:> ");
                     }
 
                     //
@@ -288,6 +304,26 @@ public class Client {
             }
         }
 
+        /**
+         * Creates and starts a {@link Thread} that prints a loading characters until the {@link
+         * Thread} is canceled via the {@link Future}. The cursor position shifts to the next
+         * character and remains there all the time.
+         *
+         * <p>How to cancel: The cancellation can be done via {@link Future#cancel(boolean)} sending
+         * {@code true} to interrupt blocking; otherwise the delay might be up to {@code 500
+         * milliseconds}
+         *
+         * <p>When it is checked for cancellation: Task checks for a interruption every iteration,
+         * each iteration is blocked by interruptable call to a {@link Thread#sleep(long)} method.
+         *
+         * <p>When the task will be canceled: The response to a cancellation is immediate.
+         *
+         * <p>What actions will be done in response to cancellation: The cursor position will be
+         * left on the same location (i.e.) next character to the position when the task was
+         * started.
+         *
+         * @return a {@link Future} of the started thread
+         */
         private Future<Void> blockInput() {
             final var load = new char[] {'|', '/', '-', '\\'};
 
@@ -312,7 +348,10 @@ public class Client {
                                     out.write("\033[J");
                                 } catch (InterruptedException e) {
                                 } catch (Exception e) {
-                                    LOG.log(Level.SEVERE,"Encountered exception in blockInput()",e );
+                                    LOG.log(
+                                            Level.SEVERE,
+                                            "Encountered exception in blockInput()",
+                                            e);
                                 }
                             },
                             null);
