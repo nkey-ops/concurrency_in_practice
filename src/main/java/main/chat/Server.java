@@ -31,6 +31,7 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 import main.chat.Server.HttpRequest.HttpMethod;
+import main.chat.Server.HttpResponse.HttpStatus;
 
 public class Server implements AutoCloseable {
     private static final Logger LOG = Logger.getLogger(Server.class.getName());
@@ -334,26 +335,27 @@ public class Server implements AutoCloseable {
             while (!Thread.currentThread().isInterrupted()
                     && (firstLine = reader.readLine()) != null) {
 
-                var statusCode = 500;
-                var message = "BAD";
+                Optional<HttpResponse> optResponse = Optional.empty();
                 try {
                     var httpRequest = parseRequest(socketName, firstLine, reader);
-                    LOG.info(
-                            "%s | Received Request | %s"
-                                    .formatted(httpRequest.getSocketName(), httpRequest));
-                    handleHttpRequest(httpRequest);
-                    statusCode = 100;
-                    message = "OK";
-                } catch (IllegalArgumentException e) {
-                    statusCode = 500;
-                    message = e.getMessage();
-                }finally {
-                    String response = "%s %s%n".formatted(statusCode, message);
-                    LOG.info("%s | Sent Response | %s".formatted(socketName, response));
-                    writer.write(response);
-                    writer.flush();
-                }
 
+                    LOG.info(
+                            "Received Request: '%s' from '%s'"
+                                    .formatted(httpRequest, clientSocket));
+
+                    handleHttpRequest(httpRequest);
+
+                    optResponse = Optional.of(new HttpResponse(HttpStatus.OK, "Success"));
+                } catch (IllegalArgumentException e) {
+                    optResponse = Optional.of(new HttpResponse(HttpStatus.BAD, e.getMessage()));
+                } finally {
+                    if (optResponse.isEmpty()) {
+                        optResponse = Optional.of(new HttpResponse(HttpStatus.BAD, "Error"));
+                    }
+
+                    LOG.info("Sent Response: '%s' to '%s'".formatted(optResponse.get(), clientSocket));
+                    sendResponse(clientSocket, optResponse.get());
+                }
             }
 
         } catch (SocketTimeoutException e) {
@@ -367,6 +369,7 @@ public class Server implements AutoCloseable {
             LOG.info("%s Disconnected".formatted(socketName, clientSocket));
         }
     }
+
 
     private void handleHttpRequest(HttpRequest httpRequest) {
         requireNonNull(httpRequest);
@@ -517,7 +520,7 @@ public class Server implements AutoCloseable {
 
         var buff = new char[1024];
         var buffList = new LinkedList<char[]>();
-        buffList.add(new char[]{'\r','\n'});
+        buffList.add(new char[] {'\r', '\n'});
         var totalSize = 2;
 
         while (reader.ready()) {
@@ -634,8 +637,7 @@ public class Server implements AutoCloseable {
      * @throws IllegalArgumentException if the parsed header was already present in the {@code
      *     headers}
      */
-    private static int convertHeader(
-            char[] data, int startIndex, HashMap<String, String> headers) {
+    private static int convertHeader(char[] data, int startIndex, HashMap<String, String> headers) {
         requireNonNull(data);
         requireNonNull(headers);
 
@@ -666,7 +668,8 @@ public class Server implements AutoCloseable {
             if (headerNameStartIndex == -1) {
                 if (!Character.isLetter(ch)) {
                     throw new IllegalArgumentException(
-                            "Incorrect character: '%s' in a first letter of the header name.".formatted(ch)
+                            "Incorrect character: '%s' in a first letter of the header name."
+                                            .formatted(ch)
                                     + " Allowed 'a-zA-Z'");
                 }
 
@@ -782,6 +785,22 @@ public class Server implements AutoCloseable {
         }
 
         return requestTarget;
+    }
+
+    private void sendResponse(Socket socket, HttpResponse httpResponse) throws IOException {
+        requireNonNull(socket);
+        requireNonNull(httpResponse);
+
+        String response =
+                "%s %s%n".formatted(httpResponse.getStatus().statusCode, httpResponse.getMessage());
+
+        try {
+            var writer = new PrintWriter(socket.getOutputStream());
+            writer.write(response);
+            writer.flush();
+        } catch (IOException e) {
+            throw new IOException("Couldn't send a response", e);
+        }
     }
 
     public static void main(String[] args) throws InterruptedException {
@@ -947,6 +966,55 @@ public class Server implements AutoCloseable {
                     + ", body="
                     + (body.isPresent() ? Arrays.toString(body.get()) : body)
                     + "]";
+        }
+    }
+
+    /**
+     * @Immutable
+     */
+    public static class HttpResponse {
+
+        private final HttpStatus status;
+
+        private final String message;
+
+        public HttpResponse(HttpStatus status, String message) {
+            this.status = status;
+            this.message = message;
+        }
+
+        public static enum HttpStatus {
+            OK(100),
+            BAD(500);
+
+            public final int statusCode;
+
+            private HttpStatus(int statusCode) {
+                this.statusCode = statusCode;
+            }
+
+            public static Optional<HttpStatus> valueOf(int status) {
+                for (var code : values()) {
+                    if (code.statusCode == status) {
+                        return Optional.of(code);
+                    }
+                }
+
+                return Optional.empty();
+            }
+        }
+
+        public HttpStatus getStatus() {
+            return status;
+        }
+
+        public String getMessage() {
+            return message;
+        }
+
+        @Override
+        public String toString() {
+            return "HttpResponse [status=" + status + ", message=" + message + "]";
         }
     }
 }

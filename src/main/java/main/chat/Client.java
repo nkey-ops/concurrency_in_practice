@@ -2,6 +2,13 @@ package main.chat;
 
 import static java.util.Objects.requireNonNull;
 
+import main.chat.Client.HttpRequest.HttpMethod;
+import main.chat.Client.HttpResponse.HttpStatus;
+import main.chat.Client.InputManager.InputMessage;
+import main.chat.Client.InputManager.InputMessageResponse;
+import main.chat.Client.ServerConnector.ServerMessage;
+import main.chat.Client.UIManager.UIMessage;
+
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
@@ -24,13 +31,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
-import main.chat.Client.HttpRequest.HttpMethod;
-import main.chat.Client.HttpResponse.HttpStatus;
-import main.chat.Client.InputManager.InputMassage;
-import main.chat.Client.InputManager.InputMassageResponse;
-import main.chat.Client.ServerConnector.ServerMessage;
-import main.chat.Client.UIManager.UIMessage;
-
 public class Client {
     private static final Logger LOG = Logger.getLogger(Client.class.getName());
 
@@ -43,8 +43,8 @@ public class Client {
     private final BlockingQueue<UIMessage> toUIMessageQueue = new LinkedBlockingQueue<>();
     private final BlockingQueue<ServerMessage> toServerMessageQueue = new LinkedBlockingQueue<>();
 
-    private BlockingQueue<InputMassage> inputToUImanager = new LinkedBlockingQueue<>();
-    private BlockingQueue<InputMassageResponse> uiManagerToInput = new LinkedBlockingQueue<>();
+    private BlockingQueue<InputMessage> inputToUImanager = new LinkedBlockingQueue<>();
+    private BlockingQueue<InputMessageResponse> uiManagerToInput = new LinkedBlockingQueue<>();
 
     private final InputManager inputManager = new InputManager(inputToUImanager, uiManagerToInput);
     private final UIManager ui =
@@ -76,41 +76,52 @@ public class Client {
 
     public static class InputManager implements Runnable {
 
-        private BlockingQueue<InputMassage> toUIManager;
-        private BlockingQueue<InputMassageResponse> toInputManager;
+        private BlockingQueue<InputMessage> toUIManager;
+        private BlockingQueue<InputMessageResponse> toInputManager;
 
         public InputManager(
-                BlockingQueue<InputMassage> toUIManager,
-                BlockingQueue<InputMassageResponse> toInputManager) {
+                BlockingQueue<InputMessage> toUIManager,
+                BlockingQueue<InputMessageResponse> toInputManager) {
             this.toUIManager = requireNonNull(toUIManager);
             this.toInputManager = requireNonNull(toInputManager);
         }
 
-        public static class InputMassage {
+        public static class InputMessage {
             private char[] buff;
 
             public char[] getBuff() {
                 return buff;
             }
 
-            public InputMassage(char[] buff) {
+            public InputMessage(char[] buff) {
                 this.buff = buff;
+            }
+
+            @Override
+            public String toString() {
+                return "InputMessage [buff=" + Arrays.toString(buff) + "]";
             }
         }
 
-        public static class InputMassageResponse {
+        public static class InputMessageResponse {
 
-            public InputMassageResponse() {}
+            @Override
+            public String toString() {
+                return "InputMessageResponse []";
+            }
         }
 
         @Override
         public void run() {
             try {
-                LOG.log(Level.FINEST, "Waiting for a start request from UIManager ");
+                LOG.log(
+                        Level.FINEST,
+                        "Waiting for a start request from '%s'".formatted(UIManager.class));
                 var startRequest = toInputManager.take();
                 LOG.log(
                         Level.FINEST,
-                        "Received a start request '%s' from UIManager".formatted(startRequest));
+                        "Received a start request '%s' from '%s'"
+                                .formatted(startRequest, UIManager.class));
 
                 var reader = new InputStreamReader(System.in);
                 while (!Thread.currentThread().isInterrupted()) {
@@ -120,9 +131,11 @@ public class Client {
                         continue;
                     }
 
-                    var inputMassage = new InputMassage(input);
+                    var inputMassage = new InputMessage(input);
 
-                    LOG.log(Level.FINEST, "Sending '%s' to UIManager".formatted(inputMassage));
+                    LOG.log(
+                            Level.FINEST,
+                            "Sending '%s' to '%s'".formatted(inputMassage, UIManager.class));
                     toUIManager.put(inputMassage);
 
                     LOG.log(
@@ -131,8 +144,8 @@ public class Client {
                     var response = toInputManager.take();
                     LOG.log(
                             Level.FINEST,
-                            "Received a response '%s' from UIManager to '%s'"
-                                    .formatted(response, inputMassage));
+                            "Received a response '%s' from '%s'"
+                                    .formatted(response, UIManager.class));
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -201,14 +214,14 @@ public class Client {
     public static class UIManager implements Runnable {
         private final BlockingQueue<ServerMessage> serverMessageQueue;
         private final BlockingQueue<UIMessage> toUIManagerQueue;
-        private BlockingQueue<InputMassage> inputToUImanager;
-        private BlockingQueue<InputMassageResponse> toInputManagerQueue;
+        private BlockingQueue<InputMessage> inputToUImanager;
+        private BlockingQueue<InputMessageResponse> toInputManagerQueue;
 
         public UIManager(
                 BlockingQueue<ServerMessage> toServerMessageQueue,
                 BlockingQueue<UIMessage> toUIManager,
-                BlockingQueue<InputMassage> inputToUImanager,
-                BlockingQueue<InputMassageResponse> uiManagerToInput) {
+                BlockingQueue<InputMessage> inputToUImanager,
+                BlockingQueue<InputMessageResponse> uiManagerToInput) {
 
             this.serverMessageQueue = requireNonNull(toServerMessageQueue);
             this.toUIManagerQueue = requireNonNull(toUIManager);
@@ -240,7 +253,7 @@ public class Client {
         public void run() {
             try {
 
-                var startResponse = new InputMassageResponse();
+                var startResponse = new InputMessageResponse();
                 LOG.log(
                         Level.FINEST,
                         "Sending: '%s' to InputManager as starting request"
@@ -266,17 +279,17 @@ public class Client {
 
                         System.out.printf("%n:");
                         var blocker = blockInput();
-                        var inputMResponse = new InputMassageResponse();
+                        var inputMResponse = new InputMessageResponse();
 
                         LOG.log(
                                 Level.FINEST,
-                                "Sending Message: '%s' to '%s "
+                                "Sending Message: '%s' to '%s'"
                                         .formatted(inputMResponse, InputManager.class));
                         toInputManagerQueue.put(inputMResponse);
 
                         LOG.log(
                                 Level.FINEST,
-                                "Waiting Response:  from '%s'".formatted(ServerConnector.class));
+                                "Waiting Response: from '%s'".formatted(ServerConnector.class));
                         var uiMessageResponse = toUIManagerQueue.take();
                         LOG.log(
                                 Level.FINEST,
@@ -407,7 +420,7 @@ public class Client {
 
             @Override
             public String toString() {
-                return data.toString();
+                return "ServerMessage [data=" + Arrays.toString(data) + "]";
             }
         }
 
@@ -455,8 +468,12 @@ public class Client {
                                         new UIMessage(
                                                 new HttpResponse(HttpStatus.BAD, e.getMessage())));
                     } finally {
-                        var uiMessage = optUIMessage.isPresent() ? optUIMessage.get() :
-                                new UIMessage(new HttpResponse(HttpStatus.BAD, "Unexpected Error"));
+                        var uiMessage =
+                                optUIMessage.isPresent()
+                                        ? optUIMessage.get()
+                                        : new UIMessage(
+                                                new HttpResponse(
+                                                        HttpStatus.BAD, "Unexpected Error"));
 
                         LOG.log(
                                 Level.FINEST,
@@ -515,7 +532,7 @@ public class Client {
 
             LOG.finest("Request Data:%n\"%s\"".formatted(requestMsg));
 
-            socket.setSoTimeout(5_000);
+            socket.setSoTimeout(10_000);
 
             String responseLine = null;
             try (var writer = new PrintWriter(socket.getOutputStream());
@@ -536,10 +553,11 @@ public class Client {
                 throw new IllegalArgumentException(
                         """
                         Failed to parse Server's ([%s]) response.
-                        Response line: '%s' 
+                        Response line: '%s'
                         Because: '%s'
                         """
-                                .formatted(socket, responseLine, e.getMessage()), e);
+                                .formatted(socket, responseLine, e.getMessage()),
+                        e);
             }
         }
 
@@ -734,6 +752,11 @@ public class Client {
 
         public String getMessage() {
             return message;
+        }
+
+        @Override
+        public String toString() {
+            return "HttpResponse [status=" + status + ", message=" + message + "]";
         }
     }
 }
