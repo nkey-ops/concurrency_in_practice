@@ -284,9 +284,7 @@ public class Server implements AutoCloseable {
                 Thread.currentThread().interrupt();
                 LOG.warning("%s was interrupted".formatted(Thread.currentThread().getName()));
             } catch (Exception e) {
-                LOG.severe(
-                        "%s throws |  %s"
-                                .formatted(Thread.currentThread().getName(), e.getMessage()));
+                LOG.log(Level.SEVERE, "Exception was thrown", e);
             }
         };
     }
@@ -307,13 +305,20 @@ public class Server implements AutoCloseable {
                     dbChatMessages.add(chatMessage);
 
                     var username = chatMessage.getUser().getUsername();
-                    var message =
+                    var header =
+                            "%s | %s:> "
+                                    .formatted(
+                                            username,
+                                            dateFormatter.format(chatMessage.getCreatedDate()));
+                    var indent = " ".repeat(header.length());
+                    var data =
                             String.valueOf(chatMessage.getMessage())
-                                    .replaceAll("\n", "\n" + " ".repeat(username.length() + 7));
+                                    .replaceAll("\n", System.lineSeparator() + indent);
 
-                    var msg = "[%s] :> %s%n".formatted(username, message);
+                    var message = "%s%s%n".formatted(header, data);
 
-                    chatWriter.write(msg);
+                    System.out.print(message);
+                    chatWriter.write(message);
                     chatWriter.flush();
                 }
 
@@ -321,9 +326,7 @@ public class Server implements AutoCloseable {
                 Thread.currentThread().interrupt();
                 LOG.warning("%s was interrupted".formatted(Thread.currentThread().getName()));
             } catch (Exception e) {
-                LOG.severe(
-                        "%s throws |  %s"
-                                .formatted(Thread.currentThread().getName(), e.getMessage()));
+                LOG.log(Level.SEVERE, "Exception was thrown", e);
             }
         };
     }
@@ -387,21 +390,8 @@ public class Server implements AutoCloseable {
         var body = httpRequest.getBody();
         if (body.isPresent()) {
             char[] data = body.get();
-            var message = new ChatMessage(data, new User("", ""));
+            var message = new ChatMessage(data, new User(httpRequest.getSocketName(), ""));
             chatMessages.add(message);
-
-            var header =
-                    "%s | %s:> "
-                            .formatted(
-                                    httpRequest.getSocketName(),
-                                    dateFormatter.format(message.getCreatedDate()));
-
-            String indent = " ".repeat(header.length());
-
-            System.out.printf(
-                    "%s%s%n",
-                    header,
-                    String.valueOf(data).replaceAll("\n", System.lineSeparator() + indent));
         }
     }
 
