@@ -281,11 +281,6 @@ public class Client {
                         var blocker = blockInput();
                         var inputMResponse = new InputMessageResponse();
 
-                        LOG.log(
-                                Level.FINEST,
-                                "Sending Message: '%s' to '%s'"
-                                        .formatted(inputMResponse, InputManager.class));
-                        toInputManagerQueue.put(inputMResponse);
 
                         LOG.log(
                                 Level.FINEST,
@@ -307,6 +302,12 @@ public class Client {
                                     "< Couldn't send a message due to '%s'%n:> ",
                                     httpResponse.getMessage());
                         }
+
+                        LOG.log(
+                                Level.FINEST,
+                                "Sending Message: '%s' to '%s'"
+                                        .formatted(inputMResponse, InputManager.class));
+                        toInputManagerQueue.put(inputMResponse);
                     }
                 }
             } catch (InterruptedException e) {
