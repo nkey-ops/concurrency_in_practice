@@ -14,6 +14,10 @@ import java.net.Socket;
 import java.net.SocketException;
 import java.net.SocketTimeoutException;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.time.format.FormatStyle;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
@@ -34,6 +38,7 @@ import main.chat.Server.HttpRequest.HttpMethod;
 import main.chat.Server.HttpResponse.HttpStatus;
 
 public class Server implements AutoCloseable {
+    // Logging
     private static final Logger LOG = Logger.getLogger(Server.class.getName());
 
     {
@@ -41,11 +46,16 @@ public class Server implements AutoCloseable {
         Logger.getLogger("").getHandlers()[0].setLevel(Level.FINEST);
     }
 
+    private static final DateTimeFormatter dateFormatter = 
+        DateTimeFormatter.ofLocalizedDateTime(FormatStyle.SHORT)
+        .withZone(ZoneOffset.UTC);
+
+
+    // Socket Management
     private final int CONNECTION_POOL_SIZE = 1;
     private final int CLIENT_POOL_SIZE = 1;
     private final int SERVICE_POOL_SIZE = 2;
 
-    // Socket Management
     private final ThreadPoolExecutor clientPool =
             new ThreadPoolExecutor(
                     CLIENT_POOL_SIZE,
@@ -107,6 +117,7 @@ public class Server implements AutoCloseable {
     public Server() {
         Runtime.getRuntime().addShutdownHook(new Thread(this::close));
     }
+
 
     public synchronized void start() {
         if (isStarted) {
@@ -378,11 +389,13 @@ public class Server implements AutoCloseable {
         var body = httpRequest.getBody();
         if (body.isPresent()) {
             char[] data = body.get();
-            chatMessages.add(new ChatMessage(data, new User("", "")));
+            var message = new ChatMessage(data, new User("", ""));
+            chatMessages.add(message);
 
             System.out.printf(
-                    "%s:> %s%n",
+                    "%s|[%s]:> %s%n",
                     httpRequest.getSocketName(),
+                    dateFormatter.format(message.getCreatedDate()),
                     String.valueOf(data).replaceAll("\n", System.lineSeparator() + " ".repeat(21)));
         }
     }
@@ -816,8 +829,8 @@ public class Server implements AutoCloseable {
     private static class ChatMessage {
 
         private final char[] message;
-
         private final User user;
+        private final Instant created = Instant.now();
 
         public ChatMessage(char[] message, User user) {
             this.message = requireNonNull(message.clone());
@@ -830,6 +843,10 @@ public class Server implements AutoCloseable {
 
         public User getUser() {
             return user;
+        }
+
+        public Instant getCreatedDate() {
+            return created;
         }
 
         @Override
