@@ -2,6 +2,9 @@ package main.chat;
 
 import static java.util.Objects.requireNonNull;
 
+import main.chat.Server.HttpRequest.HttpMethod;
+import main.chat.Server.HttpResponse.HttpStatus;
+
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
 import java.io.FileOutputStream;
@@ -34,9 +37,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
-import main.chat.Server.HttpRequest.HttpMethod;
-import main.chat.Server.HttpResponse.HttpStatus;
-
 public class Server implements AutoCloseable {
     // Logging
     private static final Logger LOG = Logger.getLogger(Server.class.getName());
@@ -46,10 +46,8 @@ public class Server implements AutoCloseable {
         Logger.getLogger("").getHandlers()[0].setLevel(Level.FINEST);
     }
 
-    private static final DateTimeFormatter dateFormatter = 
-        DateTimeFormatter.ofLocalizedDateTime(FormatStyle.SHORT)
-        .withZone(ZoneOffset.UTC);
-
+    private static final DateTimeFormatter dateFormatter =
+            DateTimeFormatter.ofLocalizedDateTime(FormatStyle.SHORT).withZone(ZoneOffset.UTC);
 
     // Socket Management
     private final int CONNECTION_POOL_SIZE = 1;
@@ -117,7 +115,6 @@ public class Server implements AutoCloseable {
     public Server() {
         Runtime.getRuntime().addShutdownHook(new Thread(this::close));
     }
-
 
     public synchronized void start() {
         if (isStarted) {
@@ -364,7 +361,9 @@ public class Server implements AutoCloseable {
                         optResponse = Optional.of(new HttpResponse(HttpStatus.BAD, "Error"));
                     }
 
-                    LOG.info("Sent Response: '%s' to '%s'".formatted(optResponse.get(), clientSocket));
+                    LOG.info(
+                            "Sent Response: '%s' to '%s'"
+                                    .formatted(optResponse.get(), clientSocket));
                     sendResponse(clientSocket, optResponse.get());
                 }
             }
@@ -381,7 +380,6 @@ public class Server implements AutoCloseable {
         }
     }
 
-
     private void handleHttpRequest(HttpRequest httpRequest) {
         requireNonNull(httpRequest);
         httpRequests.add(httpRequest);
@@ -392,11 +390,18 @@ public class Server implements AutoCloseable {
             var message = new ChatMessage(data, new User("", ""));
             chatMessages.add(message);
 
+            var header =
+                    "%s | %s:> "
+                            .formatted(
+                                    httpRequest.getSocketName(),
+                                    dateFormatter.format(message.getCreatedDate()));
+
+            String indent = " ".repeat(header.length());
+
             System.out.printf(
-                    "%s|[%s]:> %s%n",
-                    httpRequest.getSocketName(),
-                    dateFormatter.format(message.getCreatedDate()),
-                    String.valueOf(data).replaceAll("\n", System.lineSeparator() + " ".repeat(21)));
+                    "%s%s%n",
+                    header,
+                    String.valueOf(data).replaceAll("\n", System.lineSeparator() + indent));
         }
     }
 
