@@ -2,6 +2,13 @@ package main.chat;
 
 import static java.util.Objects.requireNonNull;
 
+import main.chat.Client.HttpRequest.HttpMethod;
+import main.chat.Client.HttpResponse.HttpStatus;
+import main.chat.Client.InputManager.InputMessage;
+import main.chat.Client.InputManager.InputMessageResponse;
+import main.chat.Client.ServerConnector.ServerMessage;
+import main.chat.Client.UIManager.UIMessage;
+
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
@@ -28,13 +35,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
-import main.chat.Client.HttpRequest.HttpMethod;
-import main.chat.Client.HttpResponse.HttpStatus;
-import main.chat.Client.InputManager.InputMessage;
-import main.chat.Client.InputManager.InputMessageResponse;
-import main.chat.Client.ServerConnector.ServerMessage;
-import main.chat.Client.UIManager.UIMessage;
-
 public class Client {
     private static final Logger LOG = Logger.getLogger(Client.class.getName());
 
@@ -44,9 +44,9 @@ public class Client {
         Logger.getLogger("").getHandlers()[0].setLevel(Level.FINEST);
     }
 
-    private static final DateTimeFormatter dateFormatter = DateTimeFormatter.
-        ofLocalizedDateTime(FormatStyle.SHORT).withZone(ZoneId.systemDefault());
-
+    private static final DateTimeFormatter dateFormatter =
+            DateTimeFormatter.ofLocalizedDateTime(FormatStyle.SHORT)
+                    .withZone(ZoneId.systemDefault());
 
     private final BlockingQueue<UIMessage> toUIMessageQueue = new LinkedBlockingQueue<>();
     private final BlockingQueue<ServerMessage> toServerMessageQueue = new LinkedBlockingQueue<>();
@@ -107,7 +107,7 @@ public class Client {
 
             @Override
             public String toString() {
-                return "InputMessage [buff=" + Arrays.toString(buff) + "]";
+                return "InputMessage []";
             }
         }
 
@@ -285,9 +285,10 @@ public class Client {
         }
 
         /**
-         * Puts a {@link ServerMessage} with {@code inputMassage} data to the {@link UIManager#serverMessageQueue}
-         * Waits indefinitely for {@link UIManager#serverMessageQueue}'s response
-         * Sends an {@link InputMessageResponse} to {@link InputManager} after the {@link ServerConnector} responded
+         * Puts a {@link ServerMessage} with {@code inputMassage} data to the {@link
+         * UIManager#serverMessageQueue} Waits indefinitely for {@link
+         * UIManager#serverMessageQueue}'s response Sends an {@link InputMessageResponse} to {@link
+         * InputManager} after the {@link ServerConnector} responded
          *
          * @param inputMessage to send to the server
          * @throws InterruptedException if waits or posting of message is interrupted
@@ -295,16 +296,13 @@ public class Client {
         private void sendMessage(InputMessage inputMessage) throws InterruptedException {
             requireNonNull(inputMessage);
 
-            LOG.log(
-                    Level.FINEST,
-                    "Received :'%s' from InputManager".formatted(inputMessage));
+            LOG.log(Level.FINEST, "Received :'%s' from InputManager".formatted(inputMessage));
 
             var serverMessage = new ServerMessage(inputMessage.getBuff());
 
             LOG.log(
                     Level.FINEST,
-                    "Sending: '%s', to '%s'"
-                            .formatted(serverMessage, ServerConnector.class));
+                    "Sending: '%s', to '%s'".formatted(serverMessage, ServerConnector.class));
             serverMessageQueue.put(serverMessage);
 
             formatInputMessage(inputMessage.getBuff());
@@ -312,10 +310,7 @@ public class Client {
             var blocker = blockInput();
             var inputMResponse = new InputMessageResponse();
 
-
-            LOG.log(
-                    Level.FINEST,
-                    "Waiting Response: from '%s'".formatted(ServerConnector.class));
+            LOG.log(Level.FINEST, "Waiting Response: from '%s'".formatted(ServerConnector.class));
             var uiMessageResponse = toUIManagerQueue.take();
             LOG.log(
                     Level.FINEST,
@@ -330,19 +325,18 @@ public class Client {
 
             } else {
                 System.out.printf(
-                        "< Couldn't send a message due to '%s'%n:> ",
-                        httpResponse.getMessage());
+                        "< Couldn't send a message due to '%s'%n:> ", httpResponse.getMessage());
             }
 
             LOG.log(
                     Level.FINEST,
-                    "Sending Message: '%s' to '%s'"
-                            .formatted(inputMResponse, InputManager.class));
+                    "Sending Message: '%s' to '%s'".formatted(inputMResponse, InputManager.class));
             toInputManagerQueue.put(inputMResponse);
         }
 
         /**
          * Formats inputed text, adding time, and indent
+         *
          * @param buff format based on this input
          */
         private void formatInputMessage(char[] buff) {
@@ -356,13 +350,13 @@ public class Client {
             for (char c : buff) {
                 formattedInput.append(c);
 
-                if(c == 10) {
+                if (c == 10) {
                     lineBreaks = Math.incrementExact(lineBreaks);
                     formattedInput.append(indent);
                 }
-            } 
+            }
 
-            if(lineBreaks > 0) {
+            if (lineBreaks > 0) {
                 System.out.printf("\033[%sA", lineBreaks);
             }
             System.out.print("\r");
@@ -480,71 +474,95 @@ public class Client {
         public void run() {
             try {
                 while (!Thread.currentThread().isInterrupted()) {
-                    var msg = toServerMessageQueue.take();
-
                     Optional<UIMessage> optUIMessage = Optional.empty();
-                    try (var serverSocket = new Socket(ipAddress, port)) {
-                        var socketName =
-                                "%s:%s"
-                                        .formatted(
-                                                serverSocket.getInetAddress(),
-                                                serverSocket.getPort());
 
+                    try (var serverSocket = new Socket(ipAddress, port)) {
+
+                        var socketName = "[%s:%s]".formatted(serverSocket.getInetAddress(), serverSocket.getPort());
                         LOG.info("[%s] | Connected".formatted(socketName));
 
-                        var httpRequest =
-                                new HttpRequest(
-                                        socketName, HttpMethod.POST, "/messages", msg.getData());
+                        serverSocket.setSoTimeout(15_000);
 
-                        LOG.log(
-                                Level.INFO,
-                                "Sending Request: '%s' to socket '%s'"
-                                        .formatted(httpRequest, socketName));
-                        var httpResponse = request(serverSocket, httpRequest);
-                        LOG.log(
-                                Level.INFO,
-                                "Received Response: '%s' from socket '%s'"
-                                        .formatted(httpResponse, socketName));
+                        var restartSocket = false;
+                        while (!Thread.currentThread().isInterrupted() && !restartSocket) {
 
-                        optUIMessage = Optional.of(new UIMessage(httpResponse));
+                            System.out.printf("closed %s connected %s input %s out %s%n", serverSocket.isClosed(), serverSocket.isConnected(), serverSocket.isInputShutdown(), serverSocket.isOutputShutdown());
 
-                    } catch (Exception e) {
-                        LOG.log(
-                                Level.SEVERE,
-                                "ServerSocket:[ip:%s | port:%s] | Exception"
-                                        .formatted(ipAddress, port),
-                                e);
+                            try {
+                                var msg = toServerMessageQueue.take();
+                                var httpResponse = postChatMessage(serverSocket, msg);
 
-                        optUIMessage =
-                                Optional.of(
-                                        new UIMessage(
-                                                new HttpResponse(HttpStatus.BAD, e.getMessage())));
-                    } finally {
-                        var uiMessage =
-                                optUIMessage.isPresent()
-                                        ? optUIMessage.get()
-                                        : new UIMessage(
-                                                new HttpResponse(
-                                                        HttpStatus.BAD, "Unexpected Error"));
+                                optUIMessage = Optional.of(new UIMessage(httpResponse));
+                            } catch (Exception e) {
 
-                        LOG.log(
-                                Level.FINEST,
-                                "Sending Message: '%s' to '%s'"
-                                        .formatted(uiMessage, UIManager.class));
-                        toUIMessageQueue.put(uiMessage);
+                                LOG.log(
+                                        Level.SEVERE,
+                                        "ServerSocket:[ip:%s | port:%s] | Exception"
+                                                .formatted(ipAddress, port),
+                                        e);
 
-                        LOG.info("[%s] | Disconnected".formatted(""));
-                    }
+                                optUIMessage =
+                                        Optional.of(
+                                                new UIMessage(
+                                                        new HttpResponse(
+                                                                HttpStatus.BAD, e.getMessage())));
+                                restartSocket = true;
+                            } finally {
+                                var uiMessage =
+                                        optUIMessage.isPresent()
+                                                ? optUIMessage.get()
+                                                : new UIMessage(
+                                                        new HttpResponse(
+                                                                HttpStatus.BAD,
+                                                                "Unexpected Error"));
 
-                    try {
-                        Thread.sleep(2000);
-                    } catch (InterruptedException e) {
-                        e.printStackTrace();
+                                LOG.log(
+                                        Level.FINEST,
+                                        "Sending Message: '%s' to '%s'"
+                                                .formatted(uiMessage, UIManager.class));
+                                toUIMessageQueue.put(uiMessage);
+
+                                LOG.info("[%s] | Disconnected".formatted(""));
+                            }
+                        }
                     }
                 }
 
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                LOG.warning("%s was interrupted".formatted(Thread.currentThread()));
             } catch (Exception e) {
+                LOG.log(Level.SEVERE, "Exception was thrown", e);
             }
+        }
+
+        /**
+         * Sends the {@code msg} to the server and waits for the response
+         *
+         * @param serverSocket to establish the communication with the server
+         * @param msg that will be send to the server
+         * @return {@link HttpResponse} from the server to the message
+         * @throws IOException if there an issue with the {@code serverSocket}
+         */
+        private HttpResponse postChatMessage(Socket serverSocket, ServerMessage msg)
+                throws IOException {
+            requireNonNull(serverSocket);
+            requireNonNull(msg);
+
+            var socketName =
+                    "%s:%s".formatted(serverSocket.getInetAddress(), serverSocket.getPort());
+
+            var httpRequest =
+                    new HttpRequest(socketName, HttpMethod.POST, "/messages", msg.getData());
+
+            LOG.log(
+                    Level.INFO,
+                    "Sending Request: '%s' to socket '%s'".formatted(httpRequest, socketName));
+            var httpResponse = request(serverSocket, httpRequest);
+            LOG.log(
+                    Level.INFO,
+                    "Received Response: '%s' from socket '%s'".formatted(httpResponse, socketName));
+            return httpResponse;
         }
 
         private static HttpResponse request(Socket socket, HttpRequest httpRequest)
@@ -587,9 +605,10 @@ public class Client {
             socket.setSoTimeout(10_000);
 
             String responseLine = null;
-            try (var writer = new PrintWriter(socket.getOutputStream());
-                    var reader =
-                            new BufferedReader(new InputStreamReader(socket.getInputStream()))) {
+
+            var writer = new PrintWriter(socket.getOutputStream());
+            var reader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+            try  {
                 writer.print(requestMsg);
                 writer.flush();
                 responseLine = reader.readLine();
