@@ -2,13 +2,6 @@ package main.chat;
 
 import static java.util.Objects.requireNonNull;
 
-import main.chat.Client.HttpRequest.HttpMethod;
-import main.chat.Client.HttpResponse.HttpStatus;
-import main.chat.Client.InputManager.InputMessage;
-import main.chat.Client.InputManager.InputMessageResponse;
-import main.chat.Client.ServerConnector.ServerMessage;
-import main.chat.Client.UIManager.UIMessage;
-
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
@@ -16,6 +9,10 @@ import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.time.format.FormatStyle;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.LinkedList;
@@ -31,14 +28,25 @@ import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
+import main.chat.Client.HttpRequest.HttpMethod;
+import main.chat.Client.HttpResponse.HttpStatus;
+import main.chat.Client.InputManager.InputMessage;
+import main.chat.Client.InputManager.InputMessageResponse;
+import main.chat.Client.ServerConnector.ServerMessage;
+import main.chat.Client.UIManager.UIMessage;
+
 public class Client {
     private static final Logger LOG = Logger.getLogger(Client.class.getName());
 
     static {
-        // soooo weird
         LOG.setLevel(Level.FINEST);
+        // soooo weird
         Logger.getLogger("").getHandlers()[0].setLevel(Level.FINEST);
     }
+
+    private static final DateTimeFormatter dateFormatter = DateTimeFormatter.
+        ofLocalizedDateTime(FormatStyle.SHORT).withZone(ZoneId.systemDefault());
+
 
     private final BlockingQueue<UIMessage> toUIMessageQueue = new LinkedBlockingQueue<>();
     private final BlockingQueue<ServerMessage> toServerMessageQueue = new LinkedBlockingQueue<>();
@@ -263,51 +271,9 @@ public class Client {
                 System.out.printf("%n:> ");
                 while (!Thread.currentThread().isInterrupted()) {
 
-                    var inputMassage = inputToUImanager.poll(1, TimeUnit.SECONDS);
-                    if (inputMassage != null) {
-                        LOG.log(
-                                Level.FINEST,
-                                "Received :'%s' from InputManager".formatted(inputMassage));
-
-                        var serverMessage = new ServerMessage(inputMassage.getBuff());
-
-                        LOG.log(
-                                Level.FINEST,
-                                "Sending: '%s', to '%s'"
-                                        .formatted(serverMessage, ServerConnector.class));
-                        serverMessageQueue.put(serverMessage);
-
-                        System.out.printf("%n:");
-                        var blocker = blockInput();
-                        var inputMResponse = new InputMessageResponse();
-
-
-                        LOG.log(
-                                Level.FINEST,
-                                "Waiting Response: from '%s'".formatted(ServerConnector.class));
-                        var uiMessageResponse = toUIManagerQueue.take();
-                        LOG.log(
-                                Level.FINEST,
-                                "Received Response: '%s' from '%s'"
-                                        .formatted(uiMessageResponse, ServerConnector.class));
-
-                        var httpResponse = uiMessageResponse.getHttpResponse();
-
-                        blocker.cancel(true);
-                        if (httpResponse.getStatus() == HttpStatus.OK) {
-                            System.out.print("> ");
-
-                        } else {
-                            System.out.printf(
-                                    "< Couldn't send a message due to '%s'%n:> ",
-                                    httpResponse.getMessage());
-                        }
-
-                        LOG.log(
-                                Level.FINEST,
-                                "Sending Message: '%s' to '%s'"
-                                        .formatted(inputMResponse, InputManager.class));
-                        toInputManagerQueue.put(inputMResponse);
+                    var inputMessage = inputToUImanager.poll(1, TimeUnit.SECONDS);
+                    if (inputMessage != null) {
+                        sendMessage(inputMessage);
                     }
                 }
             } catch (InterruptedException e) {
@@ -316,6 +282,91 @@ public class Client {
             } catch (Exception e) {
                 LOG.log(Level.SEVERE, "Unexpected Exception occurred", e);
             }
+        }
+
+        /**
+         * Puts a {@link ServerMessage} with {@code inputMassage} data to the {@link UIManager#serverMessageQueue}
+         * Waits indefinitely for {@link UIManager#serverMessageQueue}'s response
+         * Sends an {@link InputMessageResponse} to {@link InputManager} after the {@link ServerConnector} responded
+         *
+         * @param inputMessage to send to the server
+         * @throws InterruptedException if waits or posting of message is interrupted
+         */
+        private void sendMessage(InputMessage inputMessage) throws InterruptedException {
+            requireNonNull(inputMessage);
+
+            LOG.log(
+                    Level.FINEST,
+                    "Received :'%s' from InputManager".formatted(inputMessage));
+
+            var serverMessage = new ServerMessage(inputMessage.getBuff());
+
+            LOG.log(
+                    Level.FINEST,
+                    "Sending: '%s', to '%s'"
+                            .formatted(serverMessage, ServerConnector.class));
+            serverMessageQueue.put(serverMessage);
+
+            formatInputMessage(inputMessage.getBuff());
+            System.out.printf("%n:");
+            var blocker = blockInput();
+            var inputMResponse = new InputMessageResponse();
+
+
+            LOG.log(
+                    Level.FINEST,
+                    "Waiting Response: from '%s'".formatted(ServerConnector.class));
+            var uiMessageResponse = toUIManagerQueue.take();
+            LOG.log(
+                    Level.FINEST,
+                    "Received Response: '%s' from '%s'"
+                            .formatted(uiMessageResponse, ServerConnector.class));
+
+            var httpResponse = uiMessageResponse.getHttpResponse();
+
+            blocker.cancel(true);
+            if (httpResponse.getStatus() == HttpStatus.OK) {
+                System.out.print("> ");
+
+            } else {
+                System.out.printf(
+                        "< Couldn't send a message due to '%s'%n:> ",
+                        httpResponse.getMessage());
+            }
+
+            LOG.log(
+                    Level.FINEST,
+                    "Sending Message: '%s' to '%s'"
+                            .formatted(inputMResponse, InputManager.class));
+            toInputManagerQueue.put(inputMResponse);
+        }
+
+        /**
+         * Formats inputed text, adding time, and indent
+         * @param buff format based on this input
+         */
+        private void formatInputMessage(char[] buff) {
+            requireNonNull(buff);
+
+            var header = "[%s]> ".formatted(dateFormatter.format(LocalDateTime.now()));
+            var indent = " ".repeat(header.length());
+            var formattedInput = new StringBuilder(header);
+
+            var lineBreaks = 0;
+            for (char c : buff) {
+                formattedInput.append(c);
+
+                if(c == 10) {
+                    lineBreaks = Math.incrementExact(lineBreaks);
+                    formattedInput.append(indent);
+                }
+            } 
+
+            if(lineBreaks > 0) {
+                System.out.printf("\033[%sA", lineBreaks);
+            }
+            System.out.print("\r");
+            System.out.print(formattedInput.toString());
         }
 
         /**
