@@ -22,7 +22,6 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.format.FormatStyle;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.Map;
@@ -105,8 +104,10 @@ public class Server implements AutoCloseable {
     private Optional<Thread> dataWriter = Optional.empty();
 
     // db
-    private final BlockingQueue<ChatMessage> chatMessages = new LinkedBlockingQueue<>();
-    private final BlockingQueue<HttpRequest> httpRequests = new LinkedBlockingQueue<>();
+    private final BlockingQueue<ChatMessage> chatMessagesProcessor = new LinkedBlockingQueue<>();
+    private final BlockingQueue<HttpRequest> httpRequestsProcessor = new LinkedBlockingQueue<>();
+    private final BlockingQueue<ChatMessage> chatMessagesDatabase = new LinkedBlockingQueue<>();
+    private final BlockingQueue<HttpRequest> httpRequestsDatabase = new LinkedBlockingQueue<>();
     private final BlockingQueue<User> chatUsers = new LinkedBlockingQueue<>();
 
     // HTTP management
@@ -128,8 +129,10 @@ public class Server implements AutoCloseable {
 
             portListener = Optional.of(getPortListener(serverSocket));
             portListener.get().start();
-            servicePool.submit(getHttpRequestProcessor(httpRequests, new LinkedBlockingQueue<>()));
-            servicePool.submit(getChatMessageProcessor(chatMessages, new LinkedBlockingQueue<>()));
+            servicePool.submit(
+                    getHttpRequestProcessor(httpRequestsProcessor, httpRequestsDatabase));
+            servicePool.submit(
+                    getChatMessageProcessor(chatMessagesProcessor, chatMessagesDatabase));
 
         } catch (Exception e) {
             e.printStackTrace();
@@ -385,13 +388,22 @@ public class Server implements AutoCloseable {
 
     private void handleHttpRequest(HttpRequest httpRequest) {
         requireNonNull(httpRequest);
-        httpRequests.add(httpRequest);
+        httpRequestsProcessor.add(httpRequest);
 
         var body = httpRequest.getBody();
-        if (body.isPresent()) {
-            char[] data = body.get();
-            var message = new ChatMessage(data, new User(httpRequest.getSocketName(), ""));
-            chatMessages.add(message);
+        switch (httpRequest.getMethod()) {
+            case POST -> {
+                if (body.isPresent()) {
+                    char[] data = body.get();
+                    var message = new ChatMessage(data, new User(httpRequest.getSocketName(), ""));
+                    chatMessagesProcessor.add(message);
+                } else {
+                    throw new IllegalArgumentException(
+                            "POST request to '%s' should have a body"
+                                    .formatted(httpRequest.getTarget()));
+                }
+            }
+            case GET -> {}
         }
     }
 
@@ -428,17 +440,12 @@ public class Server implements AutoCloseable {
 
         if (splitStartLine.length != 2) {
             throw new IllegalArgumentException(
-                    "Didn't find two space separated parameters".formatted(requestLine));
+                    "Didn't find two space separated parameters. Http Method and Http Target"
+                            .formatted(requestLine));
         }
 
-        var httpMethod =
-                HttpMethod.valueOf(
-                        splitStartLine[0]
-                                .toUpperCase()); // throws exception if it isn't a correct method
-        var requestTarget = validateRequestTarget(splitStartLine[1]);
 
-        var headersOrRequestBody = readHeadersAndBody(reader);
-
+        var headersOrRequestBody = readData(reader);
         LOG.finest(
                 """
                 Received Data: Socket: %s
@@ -446,15 +453,43 @@ public class Server implements AutoCloseable {
                 %s
                 """
                         .formatted(socketName, requestLine, Arrays.toString(headersOrRequestBody)));
+        // throws exception if it isn't a correct method
+        var httpMethod = HttpMethod.valueOf(splitStartLine[0].toUpperCase());
+        var requestTargetAndParameters = splitStartLine[1].split("?", 1);
+        var requestTarget = validateRequestTarget(splitStartLine[0]);
+        var parameters =
+                requestTargetAndParameters.length > 1
+                        ? Optional.of(parseParameters(requestTargetAndParameters[1]))
+                        : Optional.<Map<String, String>>empty();
+
+
+        var headerAndBody = getHeadersOrBody(headersOrRequestBody);
+
+        var httpRequestBuilder = new HttpRequest.Builder(socketName, httpMethod, requestTarget);
+
+        if (headerAndBody.v1.isPresent()) {
+            httpRequestBuilder.headers(headerAndBody.v1.get());
+        } else if (headerAndBody.v2.isPresent()) {
+            httpRequestBuilder.body(headerAndBody.v2.get());
+        } else if (parameters.isPresent()) {
+            httpRequestBuilder.parameters(parameters.get());
+        }
+
+        return httpRequestBuilder.build();
+    }
+
+    public static Tuple<Optional<Map<String, String>>, Optional<char[]>> getHeadersOrBody(
+            char[] data) {
+        requireNonNull(data);
 
         // headers and body are separated by "CRLFCRLF"
         var headersLength = -1;
         var bodyStartIndex = -1;
 
         var crlfMatch = new boolean[4];
-        for (int i = 0; i < headersOrRequestBody.length; i++) {
+        for (int i = 0; i < data.length; i++) {
 
-            if (headersOrRequestBody[i] == 13) { // is "CR"
+            if (data[i] == 13) { // is "CR"
                 // [!CR, !LF, !CR, !LF] || [CR, LF, !CR, !LF]
                 if (!crlfMatch[0] || (crlfMatch[1] && !crlfMatch[2])) {
                     assert !crlfMatch[0] && !crlfMatch[1] && !crlfMatch[2] && !crlfMatch[3]
@@ -464,7 +499,7 @@ public class Server implements AutoCloseable {
                 } else {
                     crlfMatch = new boolean[4];
                 }
-            } else if (headersOrRequestBody[i] == 10) { // is "LF"
+            } else if (data[i] == 10) { // is "LF"
                 // [CR, !LF, !CR, !LF] || [CR, LF, CR, !LF]
                 if ((crlfMatch[0] && !crlfMatch[1]) || crlfMatch[2]) {
                     assert (crlfMatch[0] && !crlfMatch[1] && !crlfMatch[2] && !crlfMatch[3])
@@ -473,7 +508,7 @@ public class Server implements AutoCloseable {
                     if (crlfMatch[2]) { // last LF, mark headers, body
                         headersLength = i - 3;
 
-                        if (i + 1 < headersOrRequestBody.length) {
+                        if (i + 1 < data.length) {
                             bodyStartIndex = i + 1;
                         }
 
@@ -491,28 +526,129 @@ public class Server implements AutoCloseable {
 
         assert headersLength >= -1;
         assert bodyStartIndex >= -1;
-        assert headersLength <= headersOrRequestBody.length;
-        assert bodyStartIndex < headersOrRequestBody.length;
+        assert headersLength <= data.length;
+        assert bodyStartIndex < data.length;
 
-        Map<String, String> headers =
-                headersLength == -1
-                        ? Collections.emptyMap()
-                        : convertHeaders(Arrays.copyOf(headersOrRequestBody, headersLength));
+        var headers =
+                headersLength != -1 ? convertHeaders(Arrays.copyOf(data, headersLength)) : null;
         var body =
-                bodyStartIndex == -1
-                        ? new char[0]
-                        : Arrays.copyOfRange(
-                                headersOrRequestBody, bodyStartIndex, headersOrRequestBody.length);
+                bodyStartIndex != -1 ? Arrays.copyOfRange(data, bodyStartIndex, data.length) : null;
+        return new Tuple<>(Optional.ofNullable(headers), Optional.ofNullable(body));
+    }
 
-        if (headers.isEmpty() && body.length == 0) {
-            return new HttpRequest(socketName, httpMethod, requestTarget);
-        } else if (headers.isEmpty()) {
-            return new HttpRequest(socketName, httpMethod, requestTarget, body);
-        } else if (body.length == 0) {
-            return new HttpRequest(socketName, httpMethod, requestTarget, headers);
-        } else {
-            return new HttpRequest(socketName, httpMethod, requestTarget, headers, body);
+    public static class Tuple<V1, V2> {
+        public final V1 v1;
+        public final V2 v2;
+
+        public Tuple(V1 v1, V2 v2) {
+            this.v1 = requireNonNull(v1);
+            this.v2 = requireNonNull(v2);
         }
+    }
+
+    /**
+     * Parameters should have the followwing pattern [a-Z]+=[a-Z0-9]+&? Dublicated params will be
+     * silently ignored
+     *
+     * @param parameters
+     * @return
+     */
+    private static Map<String, String> parseParameters(String parameters) {
+        requireNonNull(parameters);
+
+        if (parameters.length() < 3) {
+            throw new IllegalArgumentException(
+                    "Length of parameters should be more than 2. Params: '%s'"
+                            .formatted(parameters));
+        }
+
+        var result = new HashMap<String, String>();
+        var params = parameters.toCharArray();
+
+        var isKey = true; // are we parsing a key of a parameter
+        var keyStartIndex = -1; // inclusive
+        var keyStopIndex = -1; // exclusive
+
+        var valueStartIndex = -1; // inclusive
+        var valueStopIndex = -1; // exclusive
+        for (int i = 0; i < params.length; i++) {
+            var ch = params[i];
+
+            if (isKey) {
+                assert valueStartIndex == -1;
+                assert valueStopIndex == -1;
+                assert keyStopIndex == -1;
+
+                if (!Character.isLetter(ch) && ch != '=') {
+                    throw new IllegalArgumentException(
+                            "Paremeter's key contains not a letter: letter='%s'".formatted(ch));
+                }
+
+                if (keyStartIndex == -1) {
+                    if (ch == '=') {
+                        throw new IllegalArgumentException(
+                                "Parameter's key starts with '=' letter");
+                    }
+
+                    keyStartIndex = i;
+                } else if (ch == '=') {
+                    isKey = false;
+                    keyStopIndex = i;
+                }
+                continue;
+            } else {
+                assert keyStartIndex != -1;
+                assert keyStopIndex != -1;
+                assert valueStopIndex == -1;
+
+                if (!Character.isLetter(ch) && !Character.isDigit(ch) && ch != '&') {
+                    throw new IllegalArgumentException(
+                            "Paremeter's value contains not a letter or digit: letter='%s'"
+                                    .formatted(ch));
+                }
+
+                if (valueStartIndex == -1) {
+                    if (ch == '&') {
+                        throw new IllegalArgumentException(
+                                "Parameter's value starts with '&' letter");
+                    }
+                    valueStartIndex = i;
+                    continue;
+                } else if (ch == '&') {
+                    isKey = true;
+                    valueStopIndex = i;
+                } else if (i == params.length) {
+                } else {
+                    continue;
+                }
+            }
+
+            assert keyStartIndex >= 0;
+            assert keyStopIndex >= 1;
+            assert keyStartIndex < params.length - 2;
+            assert keyStopIndex < params.length - 1;
+            assert valueStartIndex >= 1;
+            assert valueStopIndex >= 2;
+            assert valueStartIndex < params.length;
+            assert valueStopIndex <= params.length;
+
+            assert keyStopIndex - keyStartIndex >= 1;
+            assert valueStopIndex - valueStartIndex >= 1;
+
+            var key = String.valueOf(params, keyStartIndex, keyStopIndex - keyStartIndex);
+            var value = String.valueOf(params, valueStartIndex, valueStopIndex - valueStartIndex);
+
+            result.putIfAbsent(key, value); // ignoring dublicated params
+        }
+
+        assert valueStopIndex == -1;
+
+        if (keyStartIndex != -1 || keyStopIndex != -1 || valueStartIndex != -1) {
+            throw new IllegalArgumentException(
+                    "Couldn't finish a paramter. Params: '%s'".formatted(params));
+        }
+
+        return result;
     }
 
     /**
@@ -523,7 +659,7 @@ public class Server implements AutoCloseable {
      * @return read data from {@code reader} into {@code char[]} array
      * @throws IOException if there issues with reading from {@code reader}
      */
-    private static char[] readHeadersAndBody(BufferedReader reader) throws IOException {
+    private static char[] readData(BufferedReader reader) throws IOException {
         requireNonNull(reader);
 
         var buff = new char[1024];
@@ -883,63 +1019,112 @@ public class Server implements AutoCloseable {
         private final String target;
 
         private final Optional<Map<String, String>> headers;
+        private final Optional<Map<String, String>> parameters;
         private final Optional<char[]> body;
 
-        public HttpRequest(String socketName, HttpMethod method, String target) {
-            this.socketName = requireNonNull(socketName);
-            this.method = requireNonNull(method);
-            this.target = requireNonNull(target);
-            this.headers = Optional.empty();
-            this.body = Optional.empty();
-        }
-
-        /**
-         * @param method
-         * @param target
-         * @param body of the request. Cannot have length zero
-         */
-        public HttpRequest(String socketName, HttpMethod method, String target, char[] body) {
-            this.socketName = requireNonNull(socketName);
-            this.method = requireNonNull(method);
-            this.target = requireNonNull(target);
-            this.headers = Optional.empty();
-
-            if (body.length == 0) {
-                throw new IllegalArgumentException("The length of the body cannot be zero");
-            }
-            this.body = Optional.of(requireNonNull(body));
-        }
-
-        public HttpRequest(
-                String socketName, HttpMethod method, String target, Map<String, String> headers) {
-            this.socketName = requireNonNull(socketName);
-            this.method = requireNonNull(method);
-            this.target = requireNonNull(target);
-            this.body = Optional.empty();
-            this.headers = Optional.of(new HashMap<>(requireNonNull(headers)));
-        }
-
-        /**
-         * @param method
-         * @param target
-         * @param headers
-         * @param body of the request. Cannot have length zero.
-         */
-        public HttpRequest(
+        private HttpRequest(
                 String socketName,
                 HttpMethod method,
                 String target,
                 Map<String, String> headers,
+                Map<String, String> parameters,
                 char[] body) {
+
             this.socketName = requireNonNull(socketName);
             this.method = requireNonNull(method);
             this.target = requireNonNull(target);
-            this.headers = Optional.of(new HashMap<>(requireNonNull(headers)));
 
-            if (body.length == 0) {
-                throw new IllegalArgumentException("The length of the body cannot be zero");
+            this.headers =
+                    headers == null
+                            ? Optional.empty()
+                            : Optional.of(new HashMap<>(requireNonNull(headers)));
+            this.parameters =
+                    parameters == null
+                            ? Optional.empty()
+                            : Optional.of(new HashMap<>(requireNonNull(headers)));
+
+            if (body != null) {
+                if (body.length == 0) {
+                    throw new IllegalArgumentException("The length of the body cannot be zero");
+                }
+                this.body = Optional.of(body.clone());
+            } else {
+                this.body = Optional.empty();
             }
-            this.body = Optional.of(requireNonNull(body));
+        }
+
+        public static class Builder {
+            private final String socketName;
+            private final HttpMethod method;
+            private final String target;
+            private Optional<Map<String, String>> parameters = Optional.empty();
+            private Optional<Map<String, String>> headers = Optional.empty();
+            private Optional<char[]> body = Optional.empty();
+
+            public Builder(String socketName, HttpMethod method, String target) {
+                this.socketName = requireNonNull(socketName);
+                this.method = requireNonNull(method);
+                this.target = requireNonNull(target);
+            }
+
+            /**
+             * @param headers to add to {@link HttpRequest}
+             * @return this {@link Builder} to continue building the {@link HttpRequest}
+             * @throws NullPointerException if {@code headers} is {@code null} or its keys or values
+             */
+            public Builder headers(Map<String, String> headers) {
+                requireNonNull(headers);
+                var hasNulls =
+                        headers.entrySet().stream()
+                                .anyMatch(
+                                        e -> {
+                                            return e.getKey() == null || e.getValue() == null;
+                                        });
+                if (hasNulls) {
+                    throw new NullPointerException(
+                            "The headers cannot contain null keys or values");
+                }
+                this.headers = Optional.of(headers);
+                return this;
+            }
+
+            /**
+             * @param parameters to add to {@link HttpRequest}
+             * @return this {@link Builder} to continue building the {@link HttpRequest}
+             * @throws NullPointerException if {@code parameters} is {@code null} or its keys or
+             *     values
+             */
+            public Builder parameters(Map<String, String> parameters) {
+                requireNonNull(parameters);
+                var hasNulls =
+                        parameters.entrySet().stream()
+                                .anyMatch(
+                                        e -> {
+                                            return e.getKey() == null || e.getValue() == null;
+                                        });
+                if (hasNulls) {
+                    throw new NullPointerException(
+                            "The parameters cannot contain null keys or values");
+                }
+
+                this.parameters = Optional.of(parameters);
+                return this;
+            }
+
+            public Builder body(char[] body) {
+                requireNonNull(body);
+
+                this.body = Optional.of(body);
+                return this;
+            }
+
+            public HttpRequest build() {
+                var body = this.body.isPresent() ? this.body.get() : null;
+                var headers = this.headers.isPresent() ? this.headers.get() : null;
+                var parameters = this.parameters.isPresent() ? this.parameters.get() : null;
+
+                return new HttpRequest(socketName, method, target, headers, parameters, body);
+            }
         }
 
         public String getSocketName() {
@@ -967,18 +1152,6 @@ public class Server implements AutoCloseable {
             POST;
         }
 
-        @Override
-        public String toString() {
-            return "HttpRequest [method="
-                    + method
-                    + ", target="
-                    + target
-                    + ", headers="
-                    + (headers.isPresent() ? headers.get() : headers)
-                    + ", body="
-                    + (body.isPresent() ? Arrays.toString(body.get()) : body)
-                    + "]";
-        }
     }
 
     /**
