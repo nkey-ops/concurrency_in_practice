@@ -8,6 +8,7 @@ import main.chat.Server.HttpResponse.HttpStatus;
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
 import java.io.FileOutputStream;
+import java.io.FileWriter;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
@@ -49,54 +50,14 @@ public class Server implements AutoCloseable {
             DateTimeFormatter.ofLocalizedDateTime(FormatStyle.SHORT).withZone(ZoneOffset.UTC);
 
     // Socket Management
-    private final int CONNECTION_POOL_SIZE = 1;
+    private final int CLIENT_QUEUE_SIZE = 1;
     private final int CLIENT_POOL_SIZE = 1;
     private final int SERVICE_POOL_SIZE = 2;
 
-    private final ThreadPoolExecutor clientPool =
-            new ThreadPoolExecutor(
-                    CLIENT_POOL_SIZE,
-                    CLIENT_POOL_SIZE,
-                    60,
-                    TimeUnit.SECONDS,
-                    new LinkedBlockingQueue<>(CONNECTION_POOL_SIZE),
-                    new ThreadPoolExecutor.CallerRunsPolicy()) {
+    // TODO access pools only via an intrinsic lock
+    private ThreadPoolExecutor clientPool = createPool(CLIENT_POOL_SIZE, CLIENT_QUEUE_SIZE);
+    private ThreadPoolExecutor servicePool = createPool(SERVICE_POOL_SIZE, SERVICE_POOL_SIZE);
 
-                @Override
-                protected void afterExecute(Runnable r, Throwable t) {
-                    var f = (FutureTask<?>) r;
-                    try {
-                        f.get();
-                        // handling escaped exceptions (i.e assertions) for debugging purposes
-                    } catch (ExecutionException e) {
-                        e.getCause().printStackTrace();
-                    } catch (Exception e) {
-
-                    }
-                }
-            };
-
-    private final ThreadPoolExecutor servicePool =
-            new ThreadPoolExecutor(
-                    SERVICE_POOL_SIZE,
-                    SERVICE_POOL_SIZE,
-                    60,
-                    TimeUnit.SECONDS,
-                    new LinkedBlockingQueue<>(SERVICE_POOL_SIZE)) {
-
-                @Override
-                protected void afterExecute(Runnable r, Throwable t) {
-                    var f = (FutureTask<?>) r;
-                    try {
-                        f.get();
-                        // handling escaped exceptions (i.e assertions) for debugging purposes
-                    } catch (ExecutionException e) {
-                        e.getCause().printStackTrace();
-                    } catch (Exception e) {
-
-                    }
-                }
-            };
 
     private boolean isStarted;
     private boolean isClosed;
@@ -113,8 +74,40 @@ public class Server implements AutoCloseable {
     // HTTP management
     private static final Set<String> requestTargets = Set.of("/messages");
 
+    private static ThreadPoolExecutor createPool(int threadPoolSize, int queueSize) {
+        return new ThreadPoolExecutor(
+                threadPoolSize,
+                threadPoolSize,
+                60,
+                TimeUnit.SECONDS,
+                new LinkedBlockingQueue<>(queueSize)) {
+
+            @Override
+            protected void afterExecute(Runnable r, Throwable t) {
+                var f = (FutureTask<?>) r;
+                try {
+                    f.get();
+                    // handling escaped exceptions (i.e assertions) for debugging purposes
+                } catch (ExecutionException e) {
+                    e.getCause().printStackTrace();
+                } catch (Exception e) {
+
+                }
+            }
+        };
+    }
+
     public Server() {
-        Runtime.getRuntime().addShutdownHook(new Thread(this::close));
+        Runtime.getRuntime()
+                .addShutdownHook(
+                        new Thread(
+                                () -> {
+                                    try {
+                                        this.close();
+                                    } catch (InterruptedException e) {
+                                        e.printStackTrace();
+                                    }
+                                }));
     }
 
     public synchronized void start() {
@@ -153,52 +146,56 @@ public class Server implements AutoCloseable {
     }
 
     @Override
-    public synchronized void close() {
-        if (!isStarted) {
-            throw new IllegalStateException("Server hass'n been started");
-        }
-
-        if (isClosed) {
-            throw new IllegalStateException("Server has already been closed");
+    public synchronized void close() throws InterruptedException {
+        if (!isStarted || isClosed) {
+            return;
         }
 
         isClosed = true;
 
         System.out.println("Clean Up: " + this);
-        cleanUpPortListener();
-        cleanUpConnectionPool();
+        var isInterrupted = cleanUpPortListener();
+        isInterrupted = cleanUpConnectionPool() ? true : isInterrupted;
+        isInterrupted = cleanUpServicePool() ? true : isInterrupted;
+        cleanUpQeueus();
         System.out.println("Cleaned Up: " + this);
 
         notifyAll();
-    }
-
-    private synchronized void cleanUpPortListener() {
-        if (portListener.isPresent()) {
-            Thread thread = portListener.get();
-            thread.interrupt();
-            portListener = Optional.empty();
-
-            System.out.println("Stopping Connection Pool Thread: " + thread);
-
-            try {
-                thread.join(2000);
-            } catch (Exception e) {
-            } // ignoring
-
-            if (thread.getState() != Thread.State.TERMINATED) {
-                System.out.println(
-                        "Couldn't shutdown on hook"
-                                + " thread: "
-                                + thread
-                                + " "
-                                + thread.getState());
-            } else {
-                System.out.println("Stoped Connection Pool" + " Thread: " + thread);
-            }
+        if (isInterrupted) {
+            throw new InterruptedException(
+                    "During cleanup, interruption occured. The clean up was complete anyway");
         }
     }
 
-    private synchronized void cleanUpConnectionPool() {
+    private synchronized boolean cleanUpPortListener() {
+        if (portListener.isEmpty()) {
+            throw new IllegalStateException("The Port Listener is not present");
+        }
+
+        Thread thread = portListener.get();
+        thread.interrupt();
+        portListener = Optional.empty();
+
+        System.out.println("Stopping Por Listener Thread: " + thread);
+
+        try {
+            thread.join(2000);
+        } catch (InterruptedException e) {
+            LOG.warning("Port Listener cleanup was interrupted");
+            return true;
+        }
+
+        if (thread.getState() != Thread.State.TERMINATED) {
+            System.out.println(
+                    "Couldn't shutdown on hook" + " thread: " + thread + " " + thread.getState());
+        } else {
+            System.out.println("Stoped Port Listener Thread: " + thread);
+        }
+
+        return false;
+    }
+
+    private synchronized boolean cleanUpConnectionPool() {
         System.out.println("Closing Connection Pool: " + clientPool);
 
         try {
@@ -213,12 +210,42 @@ public class Server implements AutoCloseable {
             if (clientPool.awaitTermination(10, TimeUnit.SECONDS)) {
                 LOG.warning("Couldn't shutdown Client Pool. Timeout");
             }
+
+            System.out.println("Closed Connection Pool");
         } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            LOG.warning("Couldn't shutdown the Client Pool, was interrupted");
-            return;
+            LOG.warning(
+                    "Couldn't wait till shutdown termination of the Client Pool. Got interrupted");
+            return true;
         }
-        System.out.println("Closed all the connections");
+
+        return false;
+    }
+
+    private synchronized boolean cleanUpServicePool() {
+        System.out.println("Closing Service Pool: " + servicePool);
+        try {
+            assert servicePool.shutdownNow().isEmpty();
+
+            if (servicePool.awaitTermination(10, TimeUnit.SECONDS)) {
+                LOG.warning("Couldn't shutdown the Service Pool. Timeout");
+            }
+            System.out.println("Closed Service Pool");
+        } catch (InterruptedException e) {
+            LOG.warning(
+                    "Couldn't wait till shutdown termination of the Service Pool. Got interrupted");
+            return true;
+        }
+
+        return false;
+    }
+
+    private void cleanUpQeueus() {
+        System.out.println("Cleaning up queues");
+        chatMessagesProcessor.clear();
+        httpRequestsProcessor.clear();
+        chatMessagesDatabase.clear();
+        httpRequestsDatabase.clear();
+        System.out.println("Queues have been cleaned up");
     }
 
     private Thread getPortListener(ServerSocket serverSocket) {
@@ -261,8 +288,7 @@ public class Server implements AutoCloseable {
 
         var requestFile = "./requests.log";
         return () -> {
-            try (var requestWriter =
-                    new BufferedWriter(new OutputStreamWriter(new FileOutputStream(requestFile)))) {
+            try (var requestWriter = new BufferedWriter(new FileWriter(requestFile))) {
 
                 while (!Thread.currentThread().isInterrupted()) {
                     var httpRequest = httpRequests.take();
@@ -444,7 +470,6 @@ public class Server implements AutoCloseable {
                             .formatted(requestLine));
         }
 
-
         var headersOrRequestBody = readData(reader);
         LOG.finest(
                 """
@@ -461,7 +486,6 @@ public class Server implements AutoCloseable {
                 requestTargetAndParameters.length > 1
                         ? Optional.of(parseParameters(requestTargetAndParameters[1]))
                         : Optional.<Map<String, String>>empty();
-
 
         var headerAndBody = getHeadersOrBody(headersOrRequestBody);
 
@@ -1151,7 +1175,6 @@ public class Server implements AutoCloseable {
             GET,
             POST;
         }
-
     }
 
     /**
