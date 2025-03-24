@@ -660,11 +660,13 @@ public class Server implements AutoCloseable {
                                 "Parameter's value starts with '&' letter");
                     }
                     valueStartIndex = i;
-                    continue;
-                } else if (ch == '&') {
+                }
+
+                if (ch == '&') {
                     isKey = true;
                     valueStopIndex = i;
-                } else if (i == params.length) {
+                } else if (i == params.length - 1) {
+                    valueStopIndex = i + 1;
                 } else {
                     continue;
                 }
@@ -685,6 +687,11 @@ public class Server implements AutoCloseable {
             var key = String.valueOf(params, keyStartIndex, keyStopIndex - keyStartIndex);
             var value = String.valueOf(params, valueStartIndex, valueStopIndex - valueStartIndex);
 
+            keyStartIndex = -1;
+            keyStopIndex = -1;
+            valueStartIndex = -1;
+            valueStopIndex = -1;
+
             result.putIfAbsent(key, value); // ignoring dublicated params
         }
 
@@ -692,7 +699,7 @@ public class Server implements AutoCloseable {
 
         if (keyStartIndex != -1 || keyStopIndex != -1 || valueStartIndex != -1) {
             throw new IllegalArgumentException(
-                    "Couldn't finish a paramter. Params: '%s'".formatted(params));
+                    "Couldn't finish a parameter. Params: '%s'".formatted(Arrays.toString(params)));
         }
 
         return result;
