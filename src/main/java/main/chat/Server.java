@@ -67,8 +67,12 @@ public class Server implements AutoCloseable {
     // db
     private final BlockingQueue<ChatMessage> chatMessagesProcessor = new LinkedBlockingQueue<>();
     private final BlockingQueue<HttpRequest> httpRequestsProcessor = new LinkedBlockingQueue<>();
-    private final BlockingQueue<ChatMessage> chatMessagesDatabase = new LinkedBlockingQueue<>();
-    private final BlockingQueue<HttpRequest> httpRequestsDatabase = new LinkedBlockingQueue<>();
+
+    /** Not thread safe, access ONLY via its intrinsic look using synchronized */
+    private final LinkedList<ChatMessage> chatMessagesDatabase = new LinkedList<>();
+
+    private final LinkedBlockingQueue<HttpRequest> httpRequestsDatabase =
+            new LinkedBlockingQueue<>();
     private final BlockingQueue<User> chatUsers = new LinkedBlockingQueue<>();
 
     // HTTP management
@@ -319,7 +323,7 @@ public class Server implements AutoCloseable {
     }
 
     private static Runnable getChatMessageProcessor(
-            BlockingQueue<ChatMessage> chatMessages, BlockingQueue<ChatMessage> dbChatMessages) {
+            BlockingQueue<ChatMessage> chatMessages, LinkedList<ChatMessage> dbChatMessages) {
         requireNonNull(chatMessages);
         requireNonNull(dbChatMessages);
 
@@ -331,7 +335,10 @@ public class Server implements AutoCloseable {
 
                 while (!Thread.currentThread().isInterrupted()) {
                     var chatMessage = chatMessages.take();
-                    dbChatMessages.add(chatMessage);
+
+                    synchronized (dbChatMessages) {
+                        dbChatMessages.add(chatMessage);
+                    }
 
                     var username = chatMessage.getUser().getUsername();
                     var header =
