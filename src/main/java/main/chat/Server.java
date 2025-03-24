@@ -702,7 +702,7 @@ public class Server implements AutoCloseable {
                 assert keyStopIndex != -1;
                 assert valueStopIndex == -1;
 
-                if (!Character.isLetter(ch) && !Character.isDigit(ch) && ch != '&') {
+                if (!Character.isLetter(ch) && !Character.isDigit(ch) && ch != '-'  && ch != '&') {
                     throw new IllegalArgumentException(
                             "Paremeter's value contains not a letter or digit: letter='%s'"
                                     .formatted(ch));
