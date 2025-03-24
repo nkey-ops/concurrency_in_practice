@@ -176,7 +176,7 @@ public class Server implements AutoCloseable {
         thread.interrupt();
         portListener = Optional.empty();
 
-        System.out.println("Stopping Por Listener Thread: " + thread);
+        System.out.println("Stopping Port Listener Thread: " + thread);
 
         try {
             thread.join(2000);
@@ -201,13 +201,13 @@ public class Server implements AutoCloseable {
         try {
             var notStartedClients = clientPool.shutdownNow();
 
-            // running not ran tasks with an interrupt status, so all the opened sockets are
-            // closed
+            // running the tasks that haven been started with an interrupt status, 
+            // so all the opened sockets are closed
             Thread.currentThread().interrupt();
             notStartedClients.forEach(Runnable::run);
             Thread.interrupted();
 
-            if (clientPool.awaitTermination(10, TimeUnit.SECONDS)) {
+            if (!clientPool.awaitTermination(1, TimeUnit.SECONDS)) {
                 LOG.warning("Couldn't shutdown Client Pool. Timeout");
             }
 
@@ -226,7 +226,7 @@ public class Server implements AutoCloseable {
         try {
             assert servicePool.shutdownNow().isEmpty();
 
-            if (servicePool.awaitTermination(10, TimeUnit.SECONDS)) {
+            if (!servicePool.awaitTermination(10, TimeUnit.SECONDS)) {
                 LOG.warning("Couldn't shutdown the Service Pool. Timeout");
             }
             System.out.println("Closed Service Pool");
