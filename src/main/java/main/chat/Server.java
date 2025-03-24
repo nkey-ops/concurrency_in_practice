@@ -451,6 +451,11 @@ public class Server implements AutoCloseable {
                 lastId++;
 
                 var messages = new LinkedList<ChatMessage>();
+
+                if(lastId >= chatMessagesDatabase.size()) {
+                    yield new HttpResponse(HttpStatus.OK, messages);
+                }
+
                 synchronized (chatMessagesDatabase) {
 
                     var listIter = chatMessagesDatabase.listIterator(lastId);
@@ -628,6 +633,7 @@ public class Server implements AutoCloseable {
                 headersLength != -1 ? convertHeaders(Arrays.copyOf(data, headersLength)) : null;
         var body =
                 bodyStartIndex != -1 ? Arrays.copyOfRange(data, bodyStartIndex, data.length) : null;
+
         return new Tuple<>(Optional.ofNullable(headers), Optional.ofNullable(body));
     }
 
