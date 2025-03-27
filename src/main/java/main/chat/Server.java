@@ -537,7 +537,7 @@ public class Server implements AutoCloseable {
                             || (crlfMatch[0] && crlfMatch[1] && crlfMatch[2] && !crlfMatch[3]);
 
                     if (crlfMatch[2]) { // last LF, mark headers, body
-                        headersLength = i - 3;
+                        headersLength = i - 3 == 0 ? -1 : i - 3;
 
                         if (i + 1 < data.length) {
                             bodyStartIndex = i + 1;
@@ -555,7 +555,7 @@ public class Server implements AutoCloseable {
             }
         }
 
-        assert headersLength >= -1;
+        assert headersLength == -1 || headersLength > 0;
         assert bodyStartIndex >= -1;
         assert headersLength <= data.length;
         assert bodyStartIndex < data.length;
