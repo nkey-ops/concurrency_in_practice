@@ -469,7 +469,7 @@ public class Server implements AutoCloseable {
         requireNonNull(requestLine, "The startLine cannot be null");
         requireNonNull(reader, "The reader cannot be null");
 
-        var splitStartLine = requestLine.split(" ");
+        var splitStartLine = requestLine.split("[ ]", 2);
 
         if (splitStartLine.length != 2) {
             throw new IllegalArgumentException(
@@ -481,14 +481,14 @@ public class Server implements AutoCloseable {
         LOG.finest(
                 """
                 Received Data: Socket: %s
-                %s
-                %s
+                '%s
+                %s'\
                 """
                         .formatted(socketName, requestLine, Arrays.toString(headersOrRequestBody)));
         // throws exception if it isn't a correct method
         var httpMethod = HttpMethod.valueOf(splitStartLine[0].toUpperCase());
-        var requestTargetAndParameters = splitStartLine[1].split("?", 1);
-        var requestTarget = validateRequestTarget(splitStartLine[0]);
+        var requestTargetAndParameters = splitStartLine[1].split("\\?", 2);
+        var requestTarget = validateRequestTarget(requestTargetAndParameters[0]);
         var parameters =
                 requestTargetAndParameters.length > 1
                         ? Optional.of(parseParameters(requestTargetAndParameters[1]))
@@ -956,7 +956,7 @@ public class Server implements AutoCloseable {
         requireNonNull(requestTarget, "The requestTarget cannot be null");
         if (!requestTargets.contains(requestTarget)) {
             throw new IllegalArgumentException(
-                    "The requestTarget doesn't exist: %s".formatted(requestTarget));
+                    "The requestTarget doesn't exist: '%s'".formatted(requestTarget));
         }
 
         return requestTarget;
