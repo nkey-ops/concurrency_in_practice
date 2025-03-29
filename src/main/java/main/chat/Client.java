@@ -2,16 +2,9 @@ package main.chat;
 
 import static java.util.Objects.requireNonNull;
 
-import main.chat.Client.HttpRequest.HttpMethod;
-import main.chat.Client.HttpResponse.HttpStatus;
-import main.chat.Client.InputManager.InputMessage;
-import main.chat.Client.InputManager.InputMessageResponse;
-import main.chat.Client.ServerConnector.ServerMessage;
-import main.chat.Client.UIManager.UIMessage;
-
-import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.io.ObjectInputStream;
 import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
 import java.net.Socket;
@@ -34,6 +27,13 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+
+import main.chat.Client.HttpRequest.HttpMethod;
+import main.chat.Client.HttpResponse.HttpStatus;
+import main.chat.Client.InputManager.InputMessage;
+import main.chat.Client.InputManager.InputMessageResponse;
+import main.chat.Client.ServerConnector.ServerMessage;
+import main.chat.Client.UIManager.UIMessage;
 
 public class Client {
     private static final Logger LOG = Logger.getLogger(Client.class.getName());
@@ -241,13 +241,13 @@ public class Client {
 
         /** Immutable class */
         public static class UIMessage {
-            private final HttpResponse httpResponse;
+            private final HttpResponse<String> httpResponse;
 
-            public UIMessage(HttpResponse httpResponse) {
+            public UIMessage(HttpResponse<String> httpResponse) {
                 this.httpResponse = requireNonNull(httpResponse);
             }
 
-            public HttpResponse getHttpResponse() {
+            public HttpResponse<String> getHttpResponse() {
                 return httpResponse;
             }
 
@@ -325,7 +325,7 @@ public class Client {
 
             } else {
                 System.out.printf(
-                        "< Couldn't send a message due to '%s'%n:> ", httpResponse.getMessage());
+                        "< Couldn't send a message due to '%s'%n:> ", httpResponse.getBody());
             }
 
             LOG.log(
@@ -485,9 +485,6 @@ public class Client {
 
                         var restartSocket = false;
                         while (!Thread.currentThread().isInterrupted() && !restartSocket) {
-
-                            System.out.printf("closed %s connected %s input %s out %s%n", serverSocket.isClosed(), serverSocket.isConnected(), serverSocket.isInputShutdown(), serverSocket.isOutputShutdown());
-
                             try {
                                 var msg = toServerMessageQueue.take();
                                 var httpResponse = postChatMessage(serverSocket, msg);
@@ -504,7 +501,7 @@ public class Client {
                                 optUIMessage =
                                         Optional.of(
                                                 new UIMessage(
-                                                        new HttpResponse(
+                                                        new HttpResponse<String>(
                                                                 HttpStatus.BAD, e.getMessage())));
                                 restartSocket = true;
                             } finally {
@@ -512,7 +509,7 @@ public class Client {
                                         optUIMessage.isPresent()
                                                 ? optUIMessage.get()
                                                 : new UIMessage(
-                                                        new HttpResponse(
+                                                        new HttpResponse<String>(
                                                                 HttpStatus.BAD,
                                                                 "Unexpected Error"));
 
@@ -542,10 +539,10 @@ public class Client {
          * @param serverSocket to establish the communication with the server
          * @param msg that will be send to the server
          * @return {@link HttpResponse} from the server to the message
-         * @throws IOException if there an issue with the {@code serverSocket}
+         * @throws Exception if there an issue with the {@code serverSocket}
          */
-        private HttpResponse postChatMessage(Socket serverSocket, ServerMessage msg)
-                throws IOException {
+        private HttpResponse<String> postChatMessage(Socket serverSocket, ServerMessage msg)
+                throws Exception {
             requireNonNull(serverSocket);
             requireNonNull(msg);
 
@@ -558,15 +555,15 @@ public class Client {
             LOG.log(
                     Level.INFO,
                     "Sending Request: '%s' to socket '%s'".formatted(httpRequest, socketName));
-            var httpResponse = request(serverSocket, httpRequest);
+            HttpResponse<String> httpResponse = request(serverSocket, httpRequest);
             LOG.log(
                     Level.INFO,
                     "Received Response: '%s' from socket '%s'".formatted(httpResponse, socketName));
             return httpResponse;
         }
 
-        private static HttpResponse request(Socket socket, HttpRequest httpRequest)
-                throws IOException {
+        private static <Body> HttpResponse<Body> request(Socket socket, HttpRequest httpRequest)
+                throws Exception {
             requireNonNull(socket);
             requireNonNull(httpRequest);
 
@@ -600,77 +597,67 @@ public class Client {
                                     headers,
                                     body);
 
-            LOG.finest("Request Data:%n\"%s\"".formatted(requestMsg));
-
-            socket.setSoTimeout(10_000);
-
-            String responseLine = null;
+            LOG.finest("Sending Message:%n'%s'".formatted(requestMsg));
 
             var writer = new PrintWriter(socket.getOutputStream());
-            var reader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-            try  {
-                writer.print(requestMsg);
-                writer.flush();
-                responseLine = reader.readLine();
+            writer.print(requestMsg);
+            writer.flush();
+
+            ObjectInputStream in = null;
+            try {
+                in = new ObjectInputStream(socket.getInputStream());
             } catch (SocketTimeoutException e) {
-                throw new SocketTimeoutException("Server response timed out");
+                throw new RuntimeException("Server response timed out", e);
             } catch (IOException e) {
-                throw new IOException("Failed communication with the server", e);
+                throw new IOException("Failed receiving response from the server", e);
             }
 
             try {
-                return parseHttpResponse(responseLine);
+                HttpResponse<Body> response = parseResponse(in);
+                LOG.finest("Received Resonse: %s".formatted(response));
+                return response;
             } catch (Exception e) {
                 throw new IllegalArgumentException(
                         """
                         Failed to parse Server's ([%s]) response.
-                        Response line: '%s'
-                        Because: '%s'
+                        Response to te request: '%s'
+                        Because: '%s'\
                         """
-                                .formatted(socket, responseLine, e.getMessage()),
+                                .formatted(socket, httpRequest, e.getMessage()),
                         e);
             }
         }
 
         /**
-         * Parses http response line that has a form of "\d{3} \s+"
+         * Reads and Parses into http response. First should be an int primitive that can be
+         * converted to {@link HttpStatus#} then object of type {@code Body}"
          *
-         * @param responseLine to parse
-         * @return {@link HttpResponce} parsed
-         * @throws IllegalArgumentException if {@code responseLine} is {@code null}
-         * @throws IllegalArgumentException if {@code responseLine} cannot be split into two strings
-         *     using ' ' character
-         * @throws IllegalArgumentException if first part of split {@code responseLine} cannot be
-         *     converted to {@link HttpStatus}
+         * @param in to read data from 
+         * @return {@link HttpResponse} parsed response
+         * @throws IOException if there are issues reading {@code in}
+         * @throws RuntimeException if class of serialized object cannot be found (i.e. server
+         *     respondes with unknown object)
          */
-        private static HttpResponse parseHttpResponse(String responseLine) {
-            if (responseLine == null) {
-                throw new IllegalArgumentException("Server returned 'EOF'");
+        private static <Body> HttpResponse<Body> parseResponse(ObjectInputStream in) throws IOException {
+            requireNonNull(in);
+
+            try {
+                int statusInt = in.readInt();
+                var status = HttpStatus.valueOf(statusInt);
+                if (status.isEmpty()) {
+                    throw new IllegalArgumentException(
+                            "Server send an incorrect status value: '%s'".formatted(statusInt));
+                }
+
+                @SuppressWarnings("unchecked")
+                var body = (Body) in.readObject();
+
+                return new HttpResponse<Body>(status.get(), body);
+            } catch (IOException e) {
+                throw new IOException("Coldn't read server response", e);
+            } catch (ClassNotFoundException e) {
+                throw new RuntimeException("Incorrect format was returned by the server", e);
             }
-
-            var indexOfSpace = responseLine.indexOf(' ');
-            if (indexOfSpace == -1) {
-                throw new IllegalArgumentException(
-                        "Server returned an incorrect response: '%s'".formatted(responseLine));
-            }
-
-            var message = responseLine.substring(indexOfSpace + 1);
-
-            var stringStatusCode = responseLine.substring(0, indexOfSpace);
-            if (!stringStatusCode.matches("\\d{3}")) {
-                throw new IllegalArgumentException(
-                        "Server returned incorrect value as a status code: '%s'"
-                                .formatted(stringStatusCode));
-            }
-
-            var httpStatusCode = HttpStatus.valueOf(Integer.parseInt(stringStatusCode));
-            if (httpStatusCode.isEmpty()) {
-                throw new IllegalArgumentException(
-                        "Server returned incorrect value as a status code: '%s'"
-                                .formatted(stringStatusCode));
-            }
-
-            return new HttpResponse(httpStatusCode.get(), message);
         }
     }
 
@@ -785,15 +772,15 @@ public class Client {
     /**
      * @Immutable
      */
-    public static class HttpResponse {
+    public static class HttpResponse<Body> {
 
         private final HttpStatus status;
 
-        private final String message;
+        private final Body body;
 
-        public HttpResponse(HttpStatus status, String message) {
+        public HttpResponse(HttpStatus status, Body message) {
             this.status = status;
-            this.message = message;
+            this.body = message;
         }
 
         public static enum HttpStatus {
@@ -821,13 +808,13 @@ public class Client {
             return status;
         }
 
-        public String getMessage() {
-            return message;
+        public Body getBody() {
+            return body;
         }
 
         @Override
         public String toString() {
-            return "HttpResponse [status=" + status + ", message=" + message + "]";
+            return "HttpResponse [status=" + status + ", body=" + body + "]";
         }
     }
 }

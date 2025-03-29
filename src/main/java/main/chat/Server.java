@@ -2,17 +2,16 @@ package main.chat;
 
 import static java.util.Objects.requireNonNull;
 
-import main.chat.Server.HttpRequest.HttpMethod;
-import main.chat.Server.HttpResponse.HttpStatus;
-
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
 import java.io.FileOutputStream;
 import java.io.FileWriter;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.io.ObjectOutputStream;
 import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
+import java.io.Serializable;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketException;
@@ -36,6 +35,9 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+
+import main.chat.Server.HttpRequest.HttpMethod;
+import main.chat.Server.HttpResponse.HttpStatus;
 
 public class Server implements AutoCloseable {
     // Logging
@@ -390,9 +392,7 @@ public class Server implements AutoCloseable {
                             "Received Request: '%s' from '%s'"
                                     .formatted(httpRequest, clientSocket));
 
-                    handleHttpRequest(httpRequest);
-
-                    optResponse = Optional.of(new HttpResponse(HttpStatus.OK, "Success"));
+                    optResponse = Optional.of(handleHttpRequest(httpRequest));
                 } catch (IllegalArgumentException e) {
                     optResponse = Optional.of(new HttpResponse(HttpStatus.BAD, e.getMessage()));
                 } finally {
@@ -401,8 +401,8 @@ public class Server implements AutoCloseable {
                     }
 
                     LOG.info(
-                            "Sent Response: '%s' to '%s'"
-                                    .formatted(optResponse.get(), clientSocket));
+                            "Sending Response: '%s' to '%s'"
+                            .formatted(optResponse.get(), clientSocket));
                     sendResponse(clientSocket, optResponse.get());
                 }
             }
@@ -419,12 +419,12 @@ public class Server implements AutoCloseable {
         }
     }
 
-    private void handleHttpRequest(HttpRequest httpRequest) {
+    private HttpResponse handleHttpRequest(HttpRequest httpRequest) {
         requireNonNull(httpRequest);
         httpRequestsProcessor.add(httpRequest);
 
         var body = httpRequest.getBody();
-        switch (httpRequest.getMethod()) {
+        return switch (httpRequest.getMethod()) {
             case POST -> {
                 if (body.isPresent()) {
                     char[] data = body.get();
@@ -435,9 +435,14 @@ public class Server implements AutoCloseable {
                             "POST request to '%s' should have a body"
                                     .formatted(httpRequest.getTarget()));
                 }
+
+                yield new HttpResponse(HttpStatus.OK, "Success");
             }
-            case GET -> {}
-        }
+            case GET -> {
+
+                yield new HttpResponse(HttpStatus.BAD, "Failure");
+            }
+        };
     }
 
     /**
@@ -965,16 +970,14 @@ public class Server implements AutoCloseable {
     private void sendResponse(Socket socket, HttpResponse httpResponse) throws IOException {
         requireNonNull(socket);
         requireNonNull(httpResponse);
-
-        String response =
-                "%s %s%n".formatted(httpResponse.getStatus().statusCode, httpResponse.getMessage());
-
+       
         try {
-            var writer = new PrintWriter(socket.getOutputStream());
-            writer.write(response);
-            writer.flush();
+            var socketOut = new ObjectOutputStream(socket.getOutputStream());
+            socketOut.writeInt(httpResponse.getStatus().statusCode);
+            socketOut.writeObject(httpResponse.getBody());
+            socketOut.flush();
         } catch (IOException e) {
-            throw new IOException("Couldn't send a response", e);
+            throw new IOException("Couldn't send a response: %s".formatted(httpResponse), e);
         }
     }
 
@@ -1190,12 +1193,16 @@ public class Server implements AutoCloseable {
     public static class HttpResponse {
 
         private final HttpStatus status;
-
-        private final String message;
+        private final Serializable body;
 
         public HttpResponse(HttpStatus status, String message) {
-            this.status = status;
-            this.message = message;
+            this.status = requireNonNull(status);
+            this.body = requireNonNull(message);
+        }
+
+        public HttpResponse(HttpStatus status, Serializable body) {
+            this.status = requireNonNull(status);
+            this.body = requireNonNull(body);
         }
 
         public static enum HttpStatus {
@@ -1223,13 +1230,17 @@ public class Server implements AutoCloseable {
             return status;
         }
 
-        public String getMessage() {
-            return message;
+        public Serializable getBody() {
+            return body;
         }
 
         @Override
         public String toString() {
-            return "HttpResponse [status=" + status + ", message=" + message + "]";
+            return "HttpResponse [status="
+                    + status
+                    + ", body="
+                    + Arrays.toString(String.valueOf(body).toCharArray())
+                    + "]";
         }
     }
 }
