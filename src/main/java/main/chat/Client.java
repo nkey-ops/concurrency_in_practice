@@ -567,36 +567,8 @@ public class Client {
             requireNonNull(socket);
             requireNonNull(httpRequest);
 
-            LOG.log(Level.FINEST, "Sending Request: '%s'".formatted(httpRequest));
-
-            var headers = new StringBuilder();
-            if (httpRequest.getHeaders().isPresent()) {
-                httpRequest
-                        .getHeaders()
-                        .get()
-                        .forEach(
-                                (k, v) -> {
-                                    headers.append(k).append(":").append(v).append("\r\n");
-                                });
-            }
-
-            var body =
-                    httpRequest.getBody().isPresent()
-                            ? "\r\n\r\n" + String.valueOf(httpRequest.getBody().get())
-                            : "";
-
-            var requestMsg =
-                    """
-                    %s %s\
-                    %s\
-                    %s\
-                    """
-                            .formatted(
-                                    httpRequest.getMethod(),
-                                    httpRequest.getTarget(),
-                                    headers,
-                                    body);
-
+            LOG.finest("Sending Request: %s".formatted(httpRequest));
+            var requestMsg = getRequestMsg(httpRequest);
             LOG.finest("Sending Message:%n'%s'".formatted(requestMsg));
 
             var writer = new PrintWriter(socket.getOutputStream());
@@ -626,6 +598,57 @@ public class Client {
                                 .formatted(socket, httpRequest, e.getMessage()),
                         e);
             }
+        }
+
+        /**
+         * Converts {@code httpRequest} to a request messag.e
+         *
+         *
+         * httpMethod and target will always be present in the returned result
+         * header key and value will be joined with a {@code :} and if there are
+         * multiple of them separated by {@code CRLF}
+         *
+         * <pre>
+         * httpMethod target\r\n
+         * headerKey:headerValue\r\n
+         * <\r\nbody>
+         * </pre
+         *
+         * @param httpRequest
+         * @return
+         */
+        private static String getRequestMsg(HttpRequest httpRequest) {
+            requireNonNull(httpRequest);
+
+            var headers = new StringBuilder();
+            if (httpRequest.getHeaders().isPresent()) {
+                httpRequest
+                        .getHeaders()
+                        .get()
+                        .forEach(
+                                (k, v) -> {
+                                    headers.append(k).append(":").append(v).append("\r\n");
+                                });
+            }
+
+            var body =
+                    httpRequest.getBody().isPresent()
+                            ? "\r\n\r\n" + String.valueOf(httpRequest.getBody().get())
+                            : "";
+
+            var requestMsg =
+                    """
+                    %s %s\
+                    %s\
+                    %s\
+                    """
+                            .formatted(
+                                    httpRequest.getMethod(),
+                                    httpRequest.getTarget(),
+                                    headers,
+                                    body);
+
+            return requestMsg;
         }
 
         /**
