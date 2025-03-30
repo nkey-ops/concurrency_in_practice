@@ -483,15 +483,13 @@ public class Client {
 
                         serverSocket.setSoTimeout(15_000);
 
-                        var restartSocket = false;
-                        while (!Thread.currentThread().isInterrupted() && !restartSocket) {
+                        while (!Thread.currentThread().isInterrupted()) {
                             try {
                                 var msg = toServerMessageQueue.take();
                                 var httpResponse = postChatMessage(serverSocket, msg);
 
                                 optUIMessage = Optional.of(new UIMessage(httpResponse));
                             } catch (Exception e) {
-
                                 LOG.log(
                                         Level.SEVERE,
                                         "ServerSocket:[ip:%s | port:%s] | Exception"
@@ -503,7 +501,7 @@ public class Client {
                                                 new UIMessage(
                                                         new HttpResponse<String>(
                                                                 HttpStatus.BAD, e.getMessage())));
-                                restartSocket = true;
+                                break;// we need to restart a socket
                             } finally {
                                 var uiMessage =
                                         optUIMessage.isPresent()
