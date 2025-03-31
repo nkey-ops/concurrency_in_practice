@@ -474,52 +474,32 @@ public class Client {
         public void run() {
             try {
                 while (!Thread.currentThread().isInterrupted()) {
-                    Optional<UIMessage> optUIMessage = Optional.empty();
-
                     try (var serverSocket = new Socket(ipAddress, port)) {
 
-                        var socketName = "[%s:%s]".formatted(serverSocket.getInetAddress(), serverSocket.getPort());
+                        var socketName =
+                                "[%s:%s]"
+                                        .formatted(
+                                                serverSocket.getInetAddress(),
+                                                serverSocket.getPort());
                         LOG.info("[%s] | Connected".formatted(socketName));
 
                         serverSocket.setSoTimeout(15_000);
 
-                        while (!Thread.currentThread().isInterrupted()) {
-                            try {
-                                var msg = toServerMessageQueue.take();
-                                var httpResponse = postChatMessage(serverSocket, msg);
+                        while (!Thread.currentThread().isInterrupted() && !serverSocket.isClosed()) {
+                            var msg = toServerMessageQueue.poll(2, TimeUnit.SECONDS);
 
-                                optUIMessage = Optional.of(new UIMessage(httpResponse));
-                            } catch (Exception e) {
-                                LOG.log(
-                                        Level.SEVERE,
-                                        "ServerSocket:[ip:%s | port:%s] | Exception"
-                                                .formatted(ipAddress, port),
-                                        e);
-
-                                optUIMessage =
-                                        Optional.of(
-                                                new UIMessage(
-                                                        new HttpResponse<String>(
-                                                                HttpStatus.BAD, e.getMessage())));
-                                break;// we need to restart a socket
-                            } finally {
-                                var uiMessage =
-                                        optUIMessage.isPresent()
-                                                ? optUIMessage.get()
-                                                : new UIMessage(
-                                                        new HttpResponse<String>(
-                                                                HttpStatus.BAD,
-                                                                "Unexpected Error"));
+                            if (msg != null) {
+                                var uiMessage = new UIMessage(postChatMessage(serverSocket, msg));
 
                                 LOG.log(
                                         Level.FINEST,
                                         "Sending Message: '%s' to '%s'"
                                                 .formatted(uiMessage, UIManager.class));
                                 toUIMessageQueue.put(uiMessage);
-
-                                LOG.info("[%s] | Disconnected".formatted(""));
                             }
                         }
+
+                        LOG.info("[%s] | Disconnected".formatted(serverSocket));
                     }
                 }
 
@@ -537,10 +517,8 @@ public class Client {
          * @param serverSocket to establish the communication with the server
          * @param msg that will be send to the server
          * @return {@link HttpResponse} from the server to the message
-         * @throws Exception if there an issue with the {@code serverSocket}
          */
-        private HttpResponse<String> postChatMessage(Socket serverSocket, ServerMessage msg)
-                throws Exception {
+        private HttpResponse<String> postChatMessage(Socket serverSocket, ServerMessage msg) {
             requireNonNull(serverSocket);
             requireNonNull(msg);
 
@@ -550,14 +528,31 @@ public class Client {
             var httpRequest =
                     new HttpRequest(socketName, HttpMethod.POST, "/messages", msg.getData());
 
-            LOG.log(
-                    Level.INFO,
-                    "Sending Request: '%s' to socket '%s'".formatted(httpRequest, socketName));
-            HttpResponse<String> httpResponse = request(serverSocket, httpRequest);
-            LOG.log(
-                    Level.INFO,
-                    "Received Response: '%s' from socket '%s'".formatted(httpResponse, socketName));
-            return httpResponse;
+            Optional<HttpResponse<String>> optResponse = Optional.empty();
+            try {
+                LOG.log(
+                        Level.INFO,
+                        "Sending Request: '%s' to socket '%s'".formatted(httpRequest, socketName));
+                optResponse = Optional.of(request(serverSocket, httpRequest));
+                LOG.log(
+                        Level.INFO,
+                        "Received Response: '%s' from socket '%s'"
+                                .formatted(optResponse.get(), socketName));
+            } catch (Exception e) {
+                LOG.log(
+                        Level.SEVERE,
+                        "ServerSocket:[ip:%s | port:%s] | Exception".formatted(ipAddress, port),
+                        e);
+
+                optResponse = Optional.of(new HttpResponse<String>(HttpStatus.BAD, e.getMessage()));
+                try {
+                    serverSocket.close();
+                } catch (IOException e1) {
+                    LOG.log(Level.SEVERE, "Couldn't close the socket on error", e);
+                }
+            }
+
+            return optResponse.get();
         }
 
         private static <Body> HttpResponse<Body> request(Socket socket, HttpRequest httpRequest)
@@ -653,13 +648,14 @@ public class Client {
          * Reads and Parses into http response. First should be an int primitive that can be
          * converted to {@link HttpStatus#} then object of type {@code Body}"
          *
-         * @param in to read data from 
+         * @param in to read data from
          * @return {@link HttpResponse} parsed response
          * @throws IOException if there are issues reading {@code in}
          * @throws RuntimeException if class of serialized object cannot be found (i.e. server
          *     respondes with unknown object)
          */
-        private static <Body> HttpResponse<Body> parseResponse(ObjectInputStream in) throws IOException {
+        private static <Body> HttpResponse<Body> parseResponse(ObjectInputStream in)
+                throws IOException {
             requireNonNull(in);
 
             try {
