@@ -2,11 +2,15 @@ package main.chat;
 
 import static java.util.Objects.requireNonNull;
 
+import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.io.InvalidClassException;
 import java.io.ObjectInputStream;
+import java.io.OptionalDataException;
 import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
+import java.io.StreamCorruptedException;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.time.LocalDateTime;
@@ -533,7 +537,8 @@ public class Client {
                 LOG.log(
                         Level.INFO,
                         "Sending Request: '%s' to socket '%s'".formatted(httpRequest, socketName));
-                optResponse = Optional.of(request(serverSocket, httpRequest));
+
+                optResponse = Optional.of(sendRequest(serverSocket, httpRequest, String.class));
                 LOG.log(
                         Level.INFO,
                         "Received Response: '%s' from socket '%s'"
@@ -555,10 +560,11 @@ public class Client {
             return optResponse.get();
         }
 
-        private static <Body> HttpResponse<Body> request(Socket socket, HttpRequest httpRequest)
-                throws Exception {
+        private static <Body> HttpResponse<Body> sendRequest(Socket socket, HttpRequest httpRequest, Class<Body> bodyType)
+                throws IOException {
             requireNonNull(socket);
             requireNonNull(httpRequest);
+            requireNonNull(bodyType);
 
             LOG.finest("Sending Request: %s".formatted(httpRequest));
             var requestMsg = getRequestMsg(httpRequest);
@@ -578,18 +584,18 @@ public class Client {
             }
 
             try {
-                HttpResponse<Body> response = parseResponse(in);
-                LOG.finest("Received Resonse: %s".formatted(response));
+                HttpResponse<Body> response = parseResponse(in, bodyType);
+                LOG.finest("Received Response: %s".formatted(response));
                 return response;
-            } catch (Exception e) {
-                throw new IllegalArgumentException(
+            } catch (IllegalArgumentException e) {
+                LOG.log(Level.SEVERE, 
                         """
                         Failed to parse Server's ([%s]) response.
                         Response to te request: '%s'
                         Because: '%s'\
-                        """
-                                .formatted(socket, httpRequest, e.getMessage()),
-                        e);
+                        """ .formatted(socket, httpRequest, e.getMessage()), e);;
+
+                throw new IllegalArgumentException("Couldn't parse Server's response");
             }
         }
 
@@ -649,14 +655,15 @@ public class Client {
          * converted to {@link HttpStatus#} then object of type {@code Body}"
          *
          * @param in to read data from
+         * @param bodyClass 
          * @return {@link HttpResponse} parsed response
          * @throws IOException if there are issues reading {@code in}
-         * @throws RuntimeException if class of serialized object cannot be found (i.e. server
-         *     respondes with unknown object)
+         * @throws IllegalArgumentException if the input contains incorrect format
          */
-        private static <Body> HttpResponse<Body> parseResponse(ObjectInputStream in)
+        private static <Body> HttpResponse<Body> parseResponse(ObjectInputStream in, Class<Body> bodyClass)
                 throws IOException {
             requireNonNull(in);
+            requireNonNull(bodyClass);
 
             try {
                 int statusInt = in.readInt();
@@ -666,14 +673,20 @@ public class Client {
                             "Server send an incorrect status value: '%s'".formatted(statusInt));
                 }
 
-                @SuppressWarnings("unchecked")
-                var body = (Body) in.readObject();
+                var body = bodyClass.cast(in.readObject());
 
-                return new HttpResponse<Body>(status.get(), body);
+                return new HttpResponse<>(status.get(), body);
+
+            } catch (EOFException
+                    | ClassNotFoundException
+                    | InvalidClassException
+                    | StreamCorruptedException
+                    | OptionalDataException
+                    | ClassCastException e) {
+                throw new IllegalArgumentException(
+                        "Server responded with incorrect data format", e);
             } catch (IOException e) {
                 throw new IOException("Coldn't read server response", e);
-            } catch (ClassNotFoundException e) {
-                throw new RuntimeException("Incorrect format was returned by the server", e);
             }
         }
     }
