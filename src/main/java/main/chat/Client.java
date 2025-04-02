@@ -549,7 +549,7 @@ public class Client {
                         "ServerSocket:[ip:%s | port:%s] | Exception".formatted(ipAddress, port),
                         e);
 
-                optResponse = Optional.of(new HttpResponse<String>(HttpStatus.BAD, e.getMessage()));
+                optResponse = Optional.of(HttpResponse.createWithMessage(HttpStatus.BAD, e.getMessage()));
                 try {
                     serverSocket.close();
                 } catch (IOException e1) {
@@ -675,7 +675,11 @@ public class Client {
 
                 var body = bodyClass.cast(in.readObject());
 
-                return new HttpResponse<>(status.get(), body);
+                if (body instanceof String) {
+                    return HttpResponse.createWithMessage(status.get(), (String) body);
+                } else {
+                    return HttpResponse.createWithBody(status.get(), body);
+                }
 
             } catch (EOFException
                     | ClassNotFoundException
@@ -805,12 +809,30 @@ public class Client {
     public static class HttpResponse<Body> {
 
         private final HttpStatus status;
+        private final Optional<String> message;
+        private final Optional<Body> body;
 
-        private final Body body;
+        private HttpResponse(HttpStatus status, Body body, String infoMessage) {
+            if (body != null && infoMessage != null) {
+                throw new IllegalAccessError("Only one argument can be non null");
+            }
 
-        public HttpResponse(HttpStatus status, Body message) {
-            this.status = status;
-            this.body = message;
+            if (body == null && infoMessage == null) {
+                throw new IllegalAccessError("Both arguments cannot be null");
+            }
+
+            this.status = requireNonNull(status);
+            this.body = Optional.ofNullable(body);
+            this.message = Optional.ofNullable(infoMessage);
+        }
+
+        public static <Body> HttpResponse<Body> createWithBody(HttpStatus status, Body body) {
+            return new HttpResponse<>(status, requireNonNull(body), null);
+        }
+
+        public static <Body> HttpResponse<Body> createWithMessage(
+                HttpStatus status, String infoMessage) {
+            return new HttpResponse<>(status, null, requireNonNull(infoMessage));
         }
 
         public static enum HttpStatus {
@@ -838,7 +860,11 @@ public class Client {
             return status;
         }
 
-        public Body getBody() {
+        public Optional<String> getMessage() {
+            return message;
+        }
+
+        public Optional<Body> getBody() {
             return body;
         }
 
