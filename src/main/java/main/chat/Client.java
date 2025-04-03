@@ -39,6 +39,8 @@ import main.chat.Client.InputManager.InputMessageResponse;
 import main.chat.Client.ServerConnector.ServerMessage;
 import main.chat.Client.UIManager.UIMessage;
 
+import main.chat.Server.ChatMessage;
+
 public class Client {
     private static final Logger LOG = Logger.getLogger(Client.class.getName());
 
@@ -245,19 +247,49 @@ public class Client {
 
         /** Immutable class */
         public static class UIMessage {
-            private final HttpResponse<String> httpResponse;
+            private final Optional<HttpResponse<String>> chatPostResponse;
+            private final Optional<HttpResponse<List<ChatMessage>>> chatMessagesResponse;
 
-            public UIMessage(HttpResponse<String> httpResponse) {
-                this.httpResponse = requireNonNull(httpResponse);
+            private UIMessage(
+                    HttpResponse<String> httpResponse,
+                    HttpResponse<List<ChatMessage>> chatMessages) {
+                if (httpResponse != null && chatMessages != null) {
+                    throw new IllegalAccessError("Only one argument can be non null");
+                }
+
+                if (httpResponse == null && chatMessages == null) {
+                    throw new IllegalAccessError("Both arguments cannot be null");
+                }
+
+                this.chatPostResponse = Optional.ofNullable(httpResponse);
+                this.chatMessagesResponse = Optional.ofNullable(chatMessages);
             }
 
-            public HttpResponse<String> getHttpResponse() {
-                return httpResponse;
+            public static UIMessage createPostChatMessageResponse(
+                    HttpResponse<String> chatMessage) {
+                return new UIMessage(requireNonNull(chatMessage), null);
+            }
+
+            public static UIMessage createGetChatMessagesResponse(
+                    HttpResponse<List<ChatMessage>> chatMessages) {
+                return new UIMessage(null, requireNonNull(chatMessages));
+            }
+
+            public Optional<HttpResponse<String>> getChatPostResponse() {
+                return chatPostResponse;
+            }
+
+            public Optional<HttpResponse<List<ChatMessage>>> getChatMessagesResponse() {
+                return chatMessagesResponse;
             }
 
             @Override
             public String toString() {
-                return "UIMessage [httpResponse=" + httpResponse + "]";
+                return "UIMessage [chatPostResponse="
+                        + chatPostResponse
+                        + ", chatMessagesResponse="
+                        + chatMessagesResponse
+                        + "]";
             }
         }
 
@@ -277,7 +309,8 @@ public class Client {
 
                     var inputMessage = inputToUImanager.poll(1, TimeUnit.SECONDS);
                     if (inputMessage != null) {
-                        sendMessage(inputMessage);
+                        sendServerConnectorMessage(inputMessage);
+                        System.out.printf(" %n:> ");
                     }
                 }
             } catch (InterruptedException e) {
@@ -297,45 +330,84 @@ public class Client {
          * @param inputMessage to send to the server
          * @throws InterruptedException if waits or posting of message is interrupted
          */
-        private void sendMessage(InputMessage inputMessage) throws InterruptedException {
+        private void sendServerConnectorMessage(InputMessage inputMessage)
+                throws InterruptedException {
             requireNonNull(inputMessage);
 
             LOG.log(Level.FINEST, "Received :'%s' from InputManager".formatted(inputMessage));
 
-            var serverMessage = new ServerMessage(inputMessage.getBuff());
+            formatInputMessage(inputMessage.getBuff());
 
+            var serverMessage = new ServerMessage(inputMessage.getBuff());
             LOG.log(
                     Level.FINEST,
                     "Sending: '%s', to '%s'".formatted(serverMessage, ServerConnector.class));
             serverMessageQueue.put(serverMessage);
 
-            formatInputMessage(inputMessage.getBuff());
-            System.out.printf("%n:");
-            var blocker = blockInput();
-            var inputMResponse = new InputMessageResponse();
-
             LOG.log(Level.FINEST, "Waiting Response: from '%s'".formatted(ServerConnector.class));
-            var uiMessageResponse = toUIManagerQueue.take();
-            LOG.log(
-                    Level.FINEST,
-                    "Received Response: '%s' from '%s'"
-                            .formatted(uiMessageResponse, ServerConnector.class));
 
-            var httpResponse = uiMessageResponse.getHttpResponse();
-
-            blocker.cancel(true);
-            if (httpResponse.getStatus() == HttpStatus.OK) {
-                System.out.print("> ");
-
-            } else {
-                System.out.printf(
-                        "< Couldn't send a message due to '%s'%n:> ", httpResponse.getBody());
+            var block = blockInput();
+            try {
+                var response = toUIManagerQueue.poll(5, TimeUnit.SECONDS);
+                validateServerConnectorResponse(serverMessage, response);
+            } catch (IllegalArgumentException e) {
+                block.cancel(true);
+                System.out.printf(" %n:< Couldn't send the message: %s".formatted(e.getMessage()));
+            } finally {
+                block.cancel(true);
             }
 
+            var inputMResponse = new InputMessageResponse();
             LOG.log(
                     Level.FINEST,
                     "Sending Message: '%s' to '%s'".formatted(inputMResponse, InputManager.class));
             toInputManagerQueue.put(inputMResponse);
+        }
+
+        /**
+         * Validates Server's response to posting a chat message.
+         *
+         * @param serverMessage for logging purposes. Non null
+         * @param response to handle. Can be null
+         * @throws IllegalArgumentException if something is wrong with the response, via {@link
+         *     IllegalArgumentException#getMessage()} the details can be extracted
+         */
+        private static void validateServerConnectorResponse(
+                ServerMessage serverMessage, UIMessage response) {
+            requireNonNull(serverMessage);
+
+            if (response == null) {
+                LOG.log(
+                        Level.SEVERE,
+                        "Received NO Response: from '%s' to the request '%s'"
+                                .formatted(ServerConnector.class, serverMessage));
+
+                throw new IllegalArgumentException("Response Timed Out");
+            }
+
+            LOG.log(
+                    Level.FINEST,
+                    "Received Response: '%s' from '%s'".formatted(response, ServerConnector.class));
+
+            if (response.getChatPostResponse().isEmpty()) {
+                LOG.log(
+                        Level.SEVERE,
+                        "Inncorrect response to the post Message request: Request: %s, Response"
+                                .formatted(serverMessage, response));
+
+                throw new IllegalArgumentException("Received Incorrect Response");
+            }
+
+            var chatPostResponse = response.getChatPostResponse().get();
+
+            if (chatPostResponse.getStatus() != HttpStatus.OK) {
+                LOG.severe(
+                        "Received Bad Status of the Request. Message: %s Response: %s"
+                                .formatted(serverMessage, chatPostResponse));
+
+                throw new IllegalArgumentException(
+                        chatPostResponse.getMessage().orElse("Bad Request Status"));
+            }
         }
 
         /**
@@ -493,7 +565,7 @@ public class Client {
                             var msg = toServerMessageQueue.poll(2, TimeUnit.SECONDS);
 
                             if (msg != null) {
-                                var uiMessage = new UIMessage(postChatMessage(serverSocket, msg));
+                                var uiMessage = UIMessage.createPostChatMessageResponse(postChatMessage(serverSocket, msg));
 
                                 LOG.log(
                                         Level.FINEST,

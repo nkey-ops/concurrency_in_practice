@@ -991,7 +991,7 @@ public class Server implements AutoCloseable {
     /**
      * TODO performance? Copies message in the constructor and every time it is requested @Immutable
      */
-    private static class ChatMessage {
+    public static class ChatMessage {
 
         private final char[] message;
         private final User user;
