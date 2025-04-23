@@ -60,7 +60,6 @@ public class Server implements AutoCloseable {
     private ThreadPoolExecutor clientPool = createPool(CLIENT_POOL_SIZE, CLIENT_QUEUE_SIZE);
     private ThreadPoolExecutor servicePool = createPool(SERVICE_POOL_SIZE, SERVICE_POOL_SIZE);
 
-
     private boolean isStarted;
     private boolean isClosed;
     private Optional<Thread> portListener = Optional.empty();
@@ -207,7 +206,7 @@ public class Server implements AutoCloseable {
         try {
             var notStartedClients = clientPool.shutdownNow();
 
-            // running the tasks that haven been started with an interrupt status, 
+            // running the tasks that haven been started with an interrupt status,
             // so all the opened sockets are closed
             Thread.currentThread().interrupt();
             notStartedClients.forEach(Runnable::run);
@@ -372,6 +371,7 @@ public class Server implements AutoCloseable {
     private void handleConnection(Socket clientSocket) {
         requireNonNull(clientSocket);
         var socketName = "[%s:%s]".formatted(clientSocket.getInetAddress(), clientSocket.getPort());
+
         try (var reader = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));
                 var writer = new PrintWriter(clientSocket.getOutputStream());
                 var sock = clientSocket) {
@@ -386,14 +386,20 @@ public class Server implements AutoCloseable {
 
                 Optional<HttpResponse> optResponse = Optional.empty();
                 try {
+                    LOG.info("Received Request: from '%s'".formatted(clientSocket));
                     var httpRequest = parseRequest(socketName, firstLine, reader);
 
-                    LOG.info(
-                            "Received Request: '%s' from '%s'"
-                                    .formatted(httpRequest, clientSocket));
+                    LOG.info("Parsed Request: '%s' from '%s'".formatted(httpRequest, clientSocket));
 
                     optResponse = Optional.of(handleHttpRequest(httpRequest));
                 } catch (IllegalArgumentException e) {
+                    // cleaning socket, if we have an issue with parsing the data
+                    var skipped = reader.skip(Integer.MAX_VALUE);
+
+                    LOG.log(
+                            Level.WARNING,
+                            "Exception processing request. Skipped characters: " + skipped,
+                            e);
                     optResponse = Optional.of(new HttpResponse(HttpStatus.BAD, e.getMessage()));
                 } finally {
                     if (optResponse.isEmpty()) {
@@ -402,18 +408,18 @@ public class Server implements AutoCloseable {
 
                     LOG.info(
                             "Sending Response: '%s' to '%s'"
-                            .formatted(optResponse.get(), clientSocket));
+                                    .formatted(optResponse.get(), clientSocket));
                     sendResponse(clientSocket, optResponse.get());
                 }
             }
 
         } catch (SocketTimeoutException e) {
-            LOG.warning("%s | Timeout | [%s] ".formatted(socketName, e.getMessage()));
+            LOG.log(Level.WARNING, "%s | Timeout".formatted(socketName), e);
             // send reponse that server is disconnecting
         } catch (IOException e) {
-            LOG.warning("%s | IOException | [%s] ".formatted(socketName, e.getMessage()));
+            LOG.log(Level.SEVERE, "%s | IOException".formatted(socketName), e);
         } catch (Exception e) {
-            LOG.warning("%s | Exception | %n[%s] ".formatted(socketName, e.getMessage()));
+            LOG.log(Level.SEVERE, "%s | Exception".formatted(socketName), e);
         } finally {
             LOG.info("%s Disconnected".formatted(socketName, clientSocket));
         }
@@ -489,7 +495,12 @@ public class Server implements AutoCloseable {
                 '%s
                 %s'\
                 """
-                        .formatted(socketName, requestLine, Arrays.toString(headersOrRequestBody)));
+                        .formatted(
+                                socketName,
+                                requestLine,
+                                headersOrRequestBody.length != 0
+                                        ? Arrays.toString(headersOrRequestBody)
+                                        : ""));
         // throws exception if it isn't a correct method
         var httpMethod = HttpMethod.valueOf(splitStartLine[0].toUpperCase());
         var requestTargetAndParameters = splitStartLine[1].split("\\?", 2);
@@ -970,7 +981,7 @@ public class Server implements AutoCloseable {
     private void sendResponse(Socket socket, HttpResponse httpResponse) throws IOException {
         requireNonNull(socket);
         requireNonNull(httpResponse);
-       
+
         try {
             var socketOut = new ObjectOutputStream(socket.getOutputStream());
             socketOut.writeInt(httpResponse.getStatus().statusCode);
