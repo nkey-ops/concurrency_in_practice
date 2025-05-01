@@ -445,10 +445,58 @@ public class Server implements AutoCloseable {
                 yield new HttpResponse(HttpStatus.OK, "Success");
             }
             case GET -> {
+                var lastId = getLastIdParam(httpRequest);
+                // starting at this id we will return messages
+                // for now -1 would mean we need all of them
+                lastId++;
 
-                yield new HttpResponse(HttpStatus.BAD, "Failure");
+                var messages = new LinkedList<ChatMessage>();
+                synchronized (chatMessagesDatabase) {
+
+                    var listIter = chatMessagesDatabase.listIterator(lastId);
+
+                    while (listIter.hasNext()) {
+                        var chMessage = listIter.next();
+                        messages.add(chMessage);
+                    }
+                }
+
+                yield new HttpResponse(HttpStatus.OK, messages);
             }
         };
+    }
+
+    /**
+     * Retrieve an 's' parameter and parases it, returning it as a size;
+     *
+     * <p>If the parameter is not present {@code -1} is returned
+     *
+     * <p>If the parameter is not a digit, or has more digits than 3, it will be silently ignored
+     * and {@code -1} returned
+     *
+     * @param request to retrieve the 's' parameter from
+     * @return value under the 's' parameter that is more or equal to 1 and not bigger than 1000. if
+     *     the parameter is not present {@code -1} is returned.
+     * @thorws {@link IllegalArgumentException} if parameter is less than 1 or biggern than 1000
+     */
+    private int getLastIdParam(HttpRequest request) {
+        requireNonNull(request);
+
+        var lastId = -1;
+        var optParams = request.getParameters();
+        if (optParams.isPresent()) {
+            var sizeString = optParams.get().get("lastId");
+            if (sizeString != null && sizeString.matches("\\d{1,3}")) {
+                lastId = Integer.parseInt(sizeString);
+                if (lastId < 0 || lastId > 1000) {
+                    throw new IllegalArgumentException(
+                            "Parameter: 'lastId' cannot be smaller than 0 and bigger than 1000");
+                }
+            }
+        }
+
+        assert lastId >= -1 && lastId <= 1000;
+        return lastId;
     }
 
     /**
@@ -1009,15 +1057,25 @@ public class Server implements AutoCloseable {
     /**
      * TODO performance? Copies message in the constructor and every time it is requested @Immutable
      */
-    public static class ChatMessage {
+    public static class ChatMessage implements Serializable {
 
         private final char[] message;
         private final User user;
         private final Instant created = Instant.now();
 
+        /** equal to the number of instances of the class created */
+        private final int id;
+
+        private static int idCounter;
+
         public ChatMessage(char[] message, User user) {
+            this.id = idCounter++;
             this.message = requireNonNull(message.clone());
             this.user = requireNonNull(user);
+        }
+
+        public int getId() {
+            return id;
         }
 
         public char[] getMessage() {
@@ -1041,7 +1099,7 @@ public class Server implements AutoCloseable {
     /**
      * @Immutable
      */
-    private static class User {
+    public static class User implements Serializable {
 
         private final String username;
 
@@ -1072,6 +1130,7 @@ public class Server implements AutoCloseable {
 
         private final Optional<Map<String, String>> headers;
         private final Optional<Map<String, String>> parameters;
+
         private final Optional<char[]> body;
 
         private HttpRequest(
@@ -1093,7 +1152,7 @@ public class Server implements AutoCloseable {
             this.parameters =
                     parameters == null
                             ? Optional.empty()
-                            : Optional.of(new HashMap<>(requireNonNull(headers)));
+                            : Optional.of(new HashMap<>(requireNonNull(parameters)));
 
             if (body != null) {
                 if (body.length == 0) {
@@ -1195,6 +1254,12 @@ public class Server implements AutoCloseable {
             return headers.isPresent() ? Optional.of(new HashMap<>(headers.get())) : headers;
         }
 
+        public Optional<Map<String, String>> getParameters() {
+            return parameters.isPresent()
+                    ? Optional.of(new HashMap<>(parameters.get()))
+                    : parameters;
+        }
+
         public Optional<char[]> getBody() {
             return body.isPresent() ? Optional.of(body.get().clone()) : body;
         }
@@ -1202,6 +1267,23 @@ public class Server implements AutoCloseable {
         public static enum HttpMethod {
             GET,
             POST;
+        }
+
+        @Override
+        public String toString() {
+            return "HttpRequest [socketName="
+                    + socketName
+                    + ", method="
+                    + method
+                    + ", target="
+                    + target
+                    + ", headers="
+                    + (headers.isPresent() ? headers.get() : headers)
+                    + ", parameters="
+                    + (parameters.isPresent() ? parameters.get() : parameters)
+                    + ", body="
+                    + (body.isPresent() ? Arrays.toString(body.get()) : body)
+                    + "]";
         }
     }
 
